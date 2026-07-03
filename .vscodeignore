@@ -1,0 +1,16 @@
+.vscode/**
+.gitignore
+node_modules/**
+out/**
+*.vsix
+media/demo-preview.gif
+media/demo.mp4
+media/icon-original.png
+src/**
+tests/**
+tsconfig*.json
+pnpm-workspace.yaml
+pnpm-lock.yaml
+**/*.map
+**/*.ts
+!out/extension.js

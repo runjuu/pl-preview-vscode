@@ -1,0 +1,83 @@
+{
+  "name": "pl-preview-vscode",
+  "displayName": "PL Preview",
+  "description": "Live, editor-native preview of PrairieLearn questions, rendered by a local Docker-backed preview server.",
+  "version": "1.0.0",
+  "publisher": "runjuu",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/runjuu/pl-preview-vscode.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0",
+    "node": ">=24"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/infoCourse.json"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "plPreview.openPreview",
+        "title": "Open PL Preview",
+        "category": "PL Preview",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "plPreview.refreshPreview",
+        "title": "Refresh preview",
+        "category": "PL Preview"
+      },
+      {
+        "command": "plPreview.newVariant",
+        "title": "New variant",
+        "category": "PL Preview"
+      },
+      {
+        "command": "plPreview.showLogs",
+        "title": "Show logs",
+        "category": "PL Preview"
+      },
+      {
+        "command": "plPreview.stopServers",
+        "title": "Stop preview servers",
+        "category": "PL Preview"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "plPreview.openPreview",
+          "when": "resourceScheme == file && plPreview.activeFileIsPreviewable",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('out', { recursive: true, force: true })\"",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node20 --external:vscode --external:cpu-features --external:*.node --outfile=out/extension.js --sourcemap",
+    "build": "tsc -p ./tsconfig.build.json --noEmit && pnpm run clean && pnpm run bundle",
+    "watch": "pnpm run bundle -- --watch",
+    "typecheck": "tsc -p ./tsconfig.json",
+    "test": "tsx --test tests/*.test.ts",
+    "vscode:prepublish": "pnpm run build"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^4.0.1",
+    "@types/node": "^24.10.1",
+    "@types/vscode": "^1.90.0",
+    "esbuild": "^0.28.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "dockerode": "^4.0.12"
+  }
+}

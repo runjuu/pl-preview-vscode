@@ -1,0 +1,9 @@
+# Build-script approvals. esbuild ships tsx's native binary, so it must build.
+# dockerode's optional SSH-transport natives (cpu-features, ssh2) and protobufjs'
+# codegen postinstall are unused — we talk to the local Docker socket, never over
+# SSH — so they stay unbuilt.
+allowBuilds:
+  cpu-features: false
+  esbuild: true
+  protobufjs: false
+  ssh2: false
