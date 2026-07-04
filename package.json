@@ -1,7 +1,7 @@
 {
   "name": "pl-preview-vscode",
   "displayName": "PL Preview",
-  "description": "Live, editor-native preview of PrairieLearn questions, rendered by a local Docker-backed preview server.",
+  "description": "Live, editor-native preview of PrairieLearn questions, rendered by a local Docker- or Podman-backed preview server.",
   "version": "1.0.0",
   "publisher": "runjuu",
   "license": "MIT",
@@ -58,6 +58,33 @@
           "group": "navigation"
         }
       ]
+    },
+    "configuration": {
+      "title": "PL Preview",
+      "properties": {
+        "plPreview.containerRuntime": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "docker",
+            "podman",
+            "custom"
+          ],
+          "enumDescriptions": [
+            "Auto-detect: use Docker if reachable, otherwise Podman.",
+            "Always use Docker.",
+            "Always use Podman.",
+            "Use the endpoint in plPreview.containerHost."
+          ],
+          "default": "auto",
+          "markdownDescription": "Which Docker-Engine-API-compatible container runtime to use for previews. `auto` tries Docker's socket, then Podman's; Colima, Rancher Desktop, and OrbStack are reached through their Docker-compatible socket."
+        },
+        "plPreview.containerHost": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Container runtime endpoint, e.g. `unix:///run/user/1000/podman/podman.sock`, `tcp://127.0.0.1:2375`, or `npipe:////./pipe/podman-machine-default`. Required when `#plPreview.containerRuntime#` is `custom`; when set with `auto`, it overrides detection. Leave blank to auto-detect."
+        }
+      }
     }
   },
   "scripts": {

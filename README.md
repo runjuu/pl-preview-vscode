@@ -11,8 +11,8 @@
 </div>
 
 Preview PrairieLearn questions beside the files you are editing. PL Preview starts
-a local Docker-backed preview server for your course and renders the active
-question in a VS Code webview.
+a local container-backed preview server for your course — using Docker or Podman —
+and renders the active question in a VS Code webview.
 
 [![PL Preview demo](https://raw.githubusercontent.com/runjuu/pl-preview-vscode/main/media/demo-preview.gif)](https://github.com/runjuu/pl-preview-vscode/raw/main/media/demo.mp4)
 
@@ -32,7 +32,9 @@ question in a VS Code webview.
 ## Requirements
 
 - VS Code 1.90.0 or newer
-- Docker Desktop installed and running
+- A Docker-Engine-API-compatible container runtime installed and running — Docker
+  Desktop or Podman (Colima, Rancher Desktop, and OrbStack work too through their
+  Docker-compatible socket)
 - A PrairieLearn course folder open in VS Code, with `infoCourse.json` at the
   course root
 - PrairieLearn v3/Freeform questions
@@ -71,10 +73,35 @@ You can also run PL Preview commands from the Command Palette:
 | **PL Preview: Show logs** | Opens the **PL Preview** Output channel. |
 | **PL Preview: Stop preview servers** | Stops all running local preview servers. |
 
+## Container runtime
+
+PL Preview runs the preview server in a local container using any
+Docker-Engine-API-compatible runtime. By default it auto-detects one — Docker's
+socket first, then Podman's — so Docker Desktop, Podman, Colima, Rancher Desktop,
+and OrbStack all work with no configuration.
+
+To choose a runtime explicitly, set these in VS Code settings:
+
+| Setting | What it does |
+| --- | --- |
+| `plPreview.containerRuntime` | `auto` (default), `docker`, `podman`, or `custom`. |
+| `plPreview.containerHost` | An explicit endpoint, e.g. `unix:///run/user/1000/podman/podman.sock`, `tcp://127.0.0.1:2375`, or `npipe:////./pipe/podman-machine-default`. Required for `custom`; with `auto` it overrides detection. |
+
+When multiple runtimes are running and `auto` is selected, Docker is preferred;
+set `plPreview.containerRuntime` to `podman` to force Podman.
+
+**Podman on macOS/Windows.** Podman runs inside a `podman machine` VM whose socket
+path is not reliably discoverable. Either run `podman-mac-helper install` (so the
+default Docker socket points at Podman and `auto` just works), export
+`CONTAINER_HOST` before launching VS Code, or set `plPreview.containerHost` to the
+machine's socket (from `podman machine inspect`). On Linux, the rootless socket
+(`$XDG_RUNTIME_DIR/podman/podman.sock`) is detected automatically.
+
 ## Limitations
 
-- Docker is required. The preview server runs in a local container.
-- First use can take a few minutes while Docker downloads the preview image.
+- A container runtime (Docker or Podman) is required. The preview server runs in a
+  local container.
+- First use can take a few minutes while the runtime downloads the preview image.
 - Only PrairieLearn v3/Freeform questions are previewed.
 - Unsaved editor changes are not rendered. Save the file to refresh the preview.
 
@@ -86,13 +113,15 @@ Make sure the active file is inside a PrairieLearn question directory under
 `questions/`, and that the opened workspace contains the course's
 `infoCourse.json`.
 
-**Docker is not installed or not running.**
+**No container runtime is installed or running.**
 
-Install Docker Desktop, start it, and then open the preview again.
+Install Docker Desktop or Podman and start it, then open the preview again. If you
+use Podman on macOS or Windows, see **Container runtime** above for pointing PL
+Preview at the `podman machine` socket.
 
 **The first preview is slow.**
 
-The first run may download a Docker image. Later previews reuse the downloaded
+The first run may download the preview image. Later previews reuse the downloaded
 image and warm preview servers.
 
 **The panel says the question type is not previewable.**

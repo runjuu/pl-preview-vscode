@@ -1,13 +1,11 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
+import Docker from 'dockerode';
 import * as vscode from 'vscode';
 
-import {
-  type DockerDesktopLaunch,
-  dockerDesktopLaunch,
-  dockerRemediation,
-} from './dockerDetection';
 import { DockerPreviewRuntime } from './dockerRuntime';
 import {
   NEW_VARIANT_COMMAND,
@@ -32,26 +30,48 @@ import {
   type PreviewViewState,
 } from './previewController';
 import { PREVIEWABLE_CONTEXT_KEY, PreviewabilityWatcher } from './previewability';
+import {
+  type RuntimeAvailability,
+  classifyRuntimeProbe,
+  detectCli,
+  runtimeRemediation,
+} from './runtimeDetection';
+import {
+  type ContainerRuntimeProfile,
+  type EndpointContext,
+  type RuntimeEndpoint,
+  type RuntimeStartAction,
+  dockerodeOptionsForEndpoint,
+} from './runtimeProfiles';
+import {
+  type RuntimeCandidate,
+  type RuntimeConfig,
+  resolveRuntimeSelection,
+} from './runtimeResolution';
 import { describeStartupProgress } from './startupProgress';
 
 /**
  * Activation glue (thin shell): adapts VSCode's editor/save events, webview
- * panel, and Docker runtime to the `PreviewController`'s ports, then lets the
+ * panel, and container runtime to the `PreviewController`'s ports, then lets the
  * controller drive the editor-following preview. All load-bearing behavior lives
  * in the controller (unit-tested); this file is the imperative shell verified by
  * driving the extension. The Stable Preview Variant toolbar + New variant
  * command and the render-diagnostics states — `notPreviewable` / `error` plus
  * the `Show logs` Output-channel action — are wired here, as is the guided
- * first-run Docker detection (including a "Start Docker Desktop" action that
- * launches a stopped daemon and waits for it) + pinned-image pull-with-progress.
- * The always-on
- * {@link PreviewabilityWatcher} that lights the editor-title preview icon on
- * question files is wired here too.
+ * first-run runtime detection: it resolves a Docker-Engine-API-compatible runtime
+ * (Docker or Podman, auto-detected or chosen via `plPreview.containerRuntime` /
+ * `plPreview.containerHost`) and, when one is installed but stopped, offers a
+ * "Start …" action that launches it and waits — plus pinned-image
+ * pull-with-progress. The always-on {@link PreviewabilityWatcher} that lights the
+ * editor-title preview icon on question files is wired here too.
  */
 
 let panel: vscode.WebviewPanel | undefined;
 let controller: PreviewController | undefined;
 let runtime: DockerPreviewRuntime | undefined;
+/** The runtime profile + endpoint bound this session, so remediation can be tailored. */
+let selectedProfile: ContainerRuntimeProfile | undefined;
+let selectedEndpoint: RuntimeEndpoint | undefined;
 let output: vscode.OutputChannel | undefined;
 
 /** Adapts VSCode's active-editor and save events to the controller's source port. */
@@ -259,16 +279,102 @@ function ensurePanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
   return panel;
 }
 
+/** The runtime bound this session by {@link ensureRuntimeReady}; must be resolved first. */
 function getRuntime(): DockerPreviewRuntime {
   if (!runtime) {
-    // First-use pull and readiness progress are surfaced in the panel's live
-    // "Starting preview…" overview (via the controller's onProgress), so the runtime
-    // only needs the Output-channel log sink here — no separate progress notification.
-    runtime = new DockerPreviewRuntime({
-      log: (line) => getOutput().appendLine(line),
-    });
+    throw new Error('preview runtime accessed before ensureRuntimeReady resolved one');
   }
   return runtime;
+}
+
+/** Read the user's runtime selection from `plPreview.*` settings. */
+function readRuntimeConfig(): RuntimeConfig {
+  const config = vscode.workspace.getConfiguration('plPreview');
+  const setting = config.get<string>('containerRuntime', 'auto');
+  const runtime = (['auto', 'docker', 'podman', 'custom'] as const).find((id) => id === setting) ?? 'auto';
+  return { runtime, containerHost: config.get<string>('containerHost', '') ?? '' };
+}
+
+/** The host facts the pure runtime-resolution logic reads. */
+function endpointContext(): EndpointContext {
+  return {
+    env: process.env,
+    platform: process.platform,
+    home: os.homedir(),
+    xdgRuntimeDir: process.env.XDG_RUNTIME_DIR,
+    programFiles: process.env.ProgramFiles,
+  };
+}
+
+/** Ping one candidate's endpoint and classify the outcome — the real probe for resolution. */
+async function probeCandidate(candidate: RuntimeCandidate): Promise<RuntimeAvailability> {
+  const client = new Docker(dockerodeOptionsForEndpoint(candidate.endpoint));
+  try {
+    await client.ping();
+    return { kind: 'available' };
+  } catch (pingError) {
+    return classifyRuntimeProbe({ pingError, cliDetected: detectCli(candidate.profile.cliNames) });
+  }
+}
+
+/**
+ * Bind the session to a resolved candidate, building its dockerode-backed runtime.
+ * Idempotent for an unchanged endpoint so warm containers survive repeated opens;
+ * a changed endpoint only reaches here after a config change disposed the old one.
+ */
+function buildRuntime(candidate: RuntimeCandidate): void {
+  if (runtime && endpointsEqual(selectedEndpoint, candidate.endpoint)) {
+    return;
+  }
+  selectedProfile = candidate.profile;
+  selectedEndpoint = candidate.endpoint;
+  // First-use pull and readiness progress surface in the panel's live "Starting
+  // preview…" overview (via the controller's onProgress), so the runtime only
+  // needs the Output-channel log sink here.
+  runtime = new DockerPreviewRuntime({
+    docker: new Docker(dockerodeOptionsForEndpoint(candidate.endpoint)),
+    cliNames: candidate.profile.cliNames,
+    log: (line) => getOutput().appendLine(line),
+  });
+  getOutput().appendLine(
+    `[pl-preview] using ${candidate.profile.displayName} via ${describeEndpoint(candidate.endpoint)}`,
+  );
+}
+
+/** Whether two endpoints address the same daemon. */
+function endpointsEqual(a: RuntimeEndpoint | undefined, b: RuntimeEndpoint): boolean {
+  if (!a || a.kind !== b.kind) return false;
+  if (a.kind === 'socket' && b.kind === 'socket') return a.socketPath === b.socketPath;
+  if (a.kind === 'tcp' && b.kind === 'tcp') {
+    return a.host === b.host && a.port === b.port && a.protocol === b.protocol;
+  }
+  if (a.kind === 'ssh' && b.kind === 'ssh') {
+    return a.host === b.host && a.port === b.port && a.username === b.username;
+  }
+  return false;
+}
+
+/** A short, human label for an endpoint (Output channel / diagnostics). */
+function describeEndpoint(endpoint: RuntimeEndpoint): string {
+  switch (endpoint.kind) {
+    case 'socket':
+      return endpoint.socketPath;
+    case 'tcp':
+      return `${endpoint.protocol}://${endpoint.host}:${endpoint.port}`;
+    case 'ssh':
+      return `ssh://${endpoint.host}:${endpoint.port}`;
+  }
+}
+
+/** Drop the current runtime (stopping its containers) so the next open re-resolves. */
+async function resetRuntime(): Promise<void> {
+  controller?.dispose();
+  controller = undefined;
+  const previous = runtime;
+  runtime = undefined;
+  selectedProfile = undefined;
+  selectedEndpoint = undefined;
+  await previous?.stopAll();
 }
 
 function getOutput(): vscode.OutputChannel {
@@ -279,10 +385,10 @@ function getOutput(): vscode.OutputChannel {
 }
 
 async function openPreview(context: vscode.ExtensionContext): Promise<void> {
-  // Before opening a panel or launching a container, make sure the Docker daemon
-  // is reachable. If it isn't, show an actionable install/start message and stop
-  // before any cryptic socket error can reach the author.
-  if (!(await ensureDockerReady())) {
+  // Before opening a panel or launching a container, resolve and reach a container
+  // runtime. If none is reachable, show an actionable install/start message and
+  // stop before any cryptic socket error can reach the author.
+  if (!(await ensureRuntimeReady())) {
     return;
   }
 
@@ -303,39 +409,86 @@ async function openPreview(context: vscode.ExtensionContext): Promise<void> {
   await controller.start();
 }
 
-/** How long to wait for a just-launched Docker Desktop to accept connections. */
-const DOCKER_START_TIMEOUT_MS = 90_000;
-/** How often to re-probe the daemon while waiting for Docker Desktop to start. */
-const DOCKER_START_POLL_INTERVAL_MS = 2_000;
-/** Briefly watch the launch command for an immediate missing-app / non-zero failure. */
-const DOCKER_LAUNCH_FAILURE_GRACE_MS = 1_500;
+/** How long to wait for a just-launched runtime to accept connections (Podman VM boots are slow). */
+const RUNTIME_START_TIMEOUT_MS = 120_000;
+/** How often to re-probe the daemon while waiting for the runtime to start. */
+const RUNTIME_START_POLL_INTERVAL_MS = 2_000;
+/** Briefly watch a GUI-app launch for an immediate missing-app / non-zero failure. */
+const RUNTIME_LAUNCH_FAILURE_GRACE_MS = 1_500;
 
 /**
- * Detect a reachable Docker daemon. Returns `true` to proceed; on a missing /
- * stopped / unreachable daemon it shows the actionable remediation and returns
- * `false` so the caller stops — except when the author clicks "Start Docker
- * Desktop", where we launch Docker, wait for its daemon to come up, and return
- * `true` to continue straight into the preview.
+ * Resolve and reach a container runtime. Returns `true` to proceed. Once a runtime
+ * is bound this session, it is only re-verified (so warm containers persist);
+ * otherwise the configured selection is resolved and the first reachable endpoint
+ * is bound. On a missing / stopped / unreachable runtime it shows the actionable
+ * remediation and returns `false` — except when the author clicks "Start …", where
+ * we launch the runtime, wait for its daemon, and return `true` to continue.
  */
-async function ensureDockerReady(): Promise<boolean> {
-  const availability = await getRuntime().checkAvailability();
-  const remediation = dockerRemediation(availability);
+async function ensureRuntimeReady(): Promise<boolean> {
+  const ctx = endpointContext();
+
+  // Already bound this session: just re-verify the same endpoint is still up.
+  if (runtime && selectedProfile && selectedEndpoint) {
+    const availability = await runtime.checkAvailability();
+    if (availability.kind === 'available') {
+      return true;
+    }
+    const candidate: RuntimeCandidate = {
+      profile: selectedProfile,
+      endpoint: selectedEndpoint,
+      source: 'wellKnown',
+    };
+    return handleUnavailable({ candidate, availability }, ctx);
+  }
+
+  const selection = await resolveRuntimeSelection(readRuntimeConfig(), ctx, probeCandidate);
+  switch (selection.kind) {
+    case 'available':
+      buildRuntime(selection.candidate);
+      return true;
+    case 'configError':
+      void vscode.window.showErrorMessage(`PL Preview: ${selection.message}`);
+      return false;
+    case 'unavailable':
+      return handleUnavailable(selection, ctx);
+  }
+}
+
+/**
+ * Show the actionable remediation for an unreachable runtime and, when the author
+ * accepts, drive it. A `custom` endpoint has no known install/start path, so it is
+ * pointed back at the setting; Docker/Podman get their tailored install-URL or
+ * "Start …" action (the latter only surfaced where we know how to start it).
+ */
+async function handleUnavailable(
+  selection: { readonly candidate: RuntimeCandidate; readonly availability: RuntimeAvailability },
+  ctx: EndpointContext,
+): Promise<boolean> {
+  const { candidate, availability } = selection;
+  const profile = candidate.profile;
+
+  if (profile.id === 'custom') {
+    void vscode.window.showErrorMessage(
+      `PL Preview: Could not reach the container runtime at ${describeEndpoint(candidate.endpoint)}. Check the "plPreview.containerHost" setting, then run the preview again.`,
+    );
+    return false;
+  }
+
+  const start = profile.startAction(ctx);
+  const remediation = runtimeRemediation(availability, profile, start?.label);
   if (!remediation) {
     return true;
   }
 
   const action = remediation.action;
-  // The launch button only appears on a platform where we know how to start
-  // Docker Desktop (and, on Windows, where its executable is present); elsewhere
-  // the notification falls back to its manual "start Docker" guidance.
-  const launcher = action?.kind === 'launchDockerDesktop' ? resolveDockerLauncher() : undefined;
-  const showButton = action?.kind === 'openUrl' || (action?.kind === 'launchDockerDesktop' && launcher);
+  // The "Start …" button only appears where we can actually start the runtime
+  // (and, for an absolute app path, where its executable exists); otherwise the
+  // notification falls back to its manual start guidance.
+  const launch = action?.kind === 'startRuntime' && start ? resolveRuntimeStart(start) : undefined;
+  const showButton = action?.kind === 'openUrl' || (action?.kind === 'startRuntime' && launch);
   const buttons = showButton && action ? [action.label] : [];
 
-  const choice = await vscode.window.showErrorMessage(
-    `PL Preview: ${remediation.message}`,
-    ...buttons,
-  );
+  const choice = await vscode.window.showErrorMessage(`PL Preview: ${remediation.message}`, ...buttons);
   if (!action || choice !== action.label) {
     return false;
   }
@@ -344,39 +497,37 @@ async function ensureDockerReady(): Promise<boolean> {
     case 'openUrl':
       void vscode.env.openExternal(vscode.Uri.parse(action.url));
       return false;
-    case 'launchDockerDesktop':
-      // `launcher` is defined here: the button only rendered once it resolved.
-      return launcher ? launchDockerAndWait(launcher) : false;
+    case 'startRuntime':
+      // `launch` is defined here: the button only rendered once it resolved.
+      return launch ? launchRuntimeAndWait(launch, candidate) : false;
   }
 }
 
 /**
- * The Docker Desktop launch command for this machine, or `undefined` when we
- * can't reliably start it. On Windows we additionally require the executable to
- * exist, so a resolved launcher always spawns something real (rather than making
- * the author wait out the timeout on a missing app).
+ * The runtime's start action for this machine, or `undefined` when we can't
+ * reliably run it. For an absolute app path (Docker Desktop.exe) we require the
+ * executable to exist, so a resolved action always spawns something real; CLI
+ * commands on PATH (`open`, `podman`, `systemctl`) are trusted.
  */
-function resolveDockerLauncher(): DockerDesktopLaunch | undefined {
-  const launcher = dockerDesktopLaunch(process.platform, process.env.ProgramFiles);
-  if (!launcher) return undefined;
-  if (process.platform === 'win32' && !fs.existsSync(launcher.command)) return undefined;
-  return launcher;
+function resolveRuntimeStart(action: RuntimeStartAction): RuntimeStartAction | undefined {
+  if (path.isAbsolute(action.command) && !fs.existsSync(action.command)) return undefined;
+  return action;
 }
 
 /**
- * Spawn Docker Desktop, then poll the daemon behind a cancellable progress
- * notification until it answers. Returns `true` once Docker is reachable so the
- * caller continues into the preview, or `false` if the author cancels or Docker
- * doesn't come up in time (with a nudge to retry).
+ * Run the runtime's start action, then poll its endpoint behind a cancellable
+ * progress notification until it answers. Returns `true` once the runtime is
+ * reachable (binding it for the session) so the caller continues into the
+ * preview, or `false` if the author cancels, the launch fails, or it doesn't come
+ * up in time (with a nudge to retry).
  */
-async function launchDockerAndWait(launcher: DockerDesktopLaunch): Promise<boolean> {
-  const launched = await startDockerDesktop(launcher);
+async function launchRuntimeAndWait(action: RuntimeStartAction, candidate: RuntimeCandidate): Promise<boolean> {
+  const launched = await startRuntimeProcess(action);
   if (!launched.ok) {
-    const detail = `[pl-preview] could not start Docker Desktop: ${launched.detail}`;
-    getOutput().appendLine(detail);
+    getOutput().appendLine(`[pl-preview] could not run "${action.label}": ${launched.detail}`);
     void vscode.window
       .showErrorMessage(
-        'PL Preview: Could not start Docker Desktop. Start it manually, then run the preview again.',
+        `PL Preview: Could not run "${action.label}". Start ${candidate.profile.displayName} manually, then run the preview again.`,
         'Show logs',
       )
       .then((choice) => {
@@ -385,18 +536,26 @@ async function launchDockerAndWait(launcher: DockerDesktopLaunch): Promise<boole
     return false;
   }
 
-  return waitForDockerAfterLaunch();
+  return waitForRuntimeAfterLaunch(candidate);
 }
 
-type DockerLaunchResult =
+type RuntimeLaunchResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly detail: string };
 
-function startDockerDesktop(launcher: DockerDesktopLaunch): Promise<DockerLaunchResult> {
+/**
+ * Spawn the runtime's start action. Two shapes, per {@link RuntimeStartAction.mode}:
+ * `launchApp` fires a GUI app that keeps running (exit 0, or a short grace window,
+ * means "launched"); `runToCompletion` is a CLI command we let finish and treat
+ * *any* exit as "done trying" — a non-zero "machine already running" is fine
+ * because the daemon poll that follows is the real source of truth. Only a spawn
+ * error (e.g. the CLI is missing) is a hard failure.
+ */
+function startRuntimeProcess(action: RuntimeStartAction): Promise<RuntimeLaunchResult> {
   return new Promise((resolve) => {
     let settled = false;
     let graceTimer: NodeJS.Timeout | undefined;
-    const settle = (result: DockerLaunchResult) => {
+    const settle = (result: RuntimeLaunchResult) => {
       if (settled) return;
       settled = true;
       if (graceTimer) clearTimeout(graceTimer);
@@ -404,8 +563,8 @@ function startDockerDesktop(launcher: DockerDesktopLaunch): Promise<DockerLaunch
     };
 
     try {
-      // Detached + unref'd so the launched app never tethers the editor's lifetime.
-      const child = spawn(launcher.command, [...launcher.args], {
+      // Detached + unref'd so the launched app/command never tethers the editor's lifetime.
+      const child = spawn(action.command, [...action.args], {
         detached: true,
         stdio: 'ignore',
       });
@@ -413,18 +572,25 @@ function startDockerDesktop(launcher: DockerDesktopLaunch): Promise<DockerLaunch
         settle({ ok: false, detail: error.message });
       });
       child.once('exit', (code, signal) => {
+        if (action.mode === 'runToCompletion') {
+          // A start command that returns when done; the daemon poll decides success.
+          settle({ ok: true });
+          return;
+        }
         if (code === 0) {
           settle({ ok: true });
           return;
         }
         const detail = code === null ? `signal ${signal ?? 'unknown'}` : `exit code ${code}`;
-        settle({ ok: false, detail: `${launcher.command} exited with ${detail}` });
+        settle({ ok: false, detail: `${action.command} exited with ${detail}` });
       });
       child.once('spawn', () => {
-        graceTimer = setTimeout(
-          () => settle({ ok: true }),
-          DOCKER_LAUNCH_FAILURE_GRACE_MS,
-        );
+        if (action.mode === 'launchApp') {
+          // A GUI app keeps running, so a clean spawn is a strong success signal;
+          // give it a brief grace window to surface an immediate failure instead.
+          graceTimer = setTimeout(() => settle({ ok: true }), RUNTIME_LAUNCH_FAILURE_GRACE_MS);
+        }
+        // runToCompletion: wait for the real exit (a machine boot can take tens of seconds).
       });
       child.unref();
     } catch (error) {
@@ -433,23 +599,26 @@ function startDockerDesktop(launcher: DockerDesktopLaunch): Promise<DockerLaunch
   });
 }
 
-async function waitForDockerAfterLaunch(): Promise<boolean> {
+async function waitForRuntimeAfterLaunch(candidate: RuntimeCandidate): Promise<boolean> {
   return vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: 'PL Preview: Waiting for Docker to start…',
+      title: `PL Preview: Waiting for ${candidate.profile.displayName} to start…`,
       cancellable: true,
     },
     async (_progress, token) => {
-      const deadline = Date.now() + DOCKER_START_TIMEOUT_MS;
+      const deadline = Date.now() + RUNTIME_START_TIMEOUT_MS;
       while (Date.now() < deadline) {
         if (token.isCancellationRequested) return false;
-        const availability = await getRuntime().checkAvailability();
-        if (availability.kind === 'available') return true;
-        await delay(DOCKER_START_POLL_INTERVAL_MS);
+        const availability = await probeCandidate(candidate);
+        if (availability.kind === 'available') {
+          buildRuntime(candidate);
+          return true;
+        }
+        await delay(RUNTIME_START_POLL_INTERVAL_MS);
       }
       void vscode.window.showWarningMessage(
-        'PL Preview: Docker is taking longer than expected to start. Run the preview again once Docker Desktop is ready.',
+        `PL Preview: ${candidate.profile.displayName} is taking longer than expected to start. Run the preview again once it is ready.`,
       );
       return false;
     },
@@ -469,6 +638,17 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(SHOW_LOGS_COMMAND, () => getOutput().show(true)),
     // "Stop preview servers": stop every warm container to reclaim resources.
     vscode.commands.registerCommand(STOP_SERVERS_COMMAND, () => controller?.stopServers()),
+    // Rebind the runtime when the author changes the runtime/endpoint settings, so
+    // the next preview resolves against the new selection (and warm containers on
+    // the old runtime are stopped).
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (
+        event.affectsConfiguration('plPreview.containerRuntime') ||
+        event.affectsConfiguration('plPreview.containerHost')
+      ) {
+        void resetRuntime();
+      }
+    }),
   );
 
   watchPreviewability(context);

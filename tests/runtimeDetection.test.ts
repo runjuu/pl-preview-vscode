@@ -1,26 +1,34 @@
 import assert from 'node:assert/strict';
-import { describe, it } from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { after, before, describe, it } from 'node:test';
 
 import {
-  DOCKER_INSTALL_URL,
   PullProgressAggregator,
-  classifyDockerProbe,
-  dockerDesktopLaunch,
-  dockerRemediation,
+  classifyRuntimeProbe,
+  detectCli,
   formatPullStatus,
-} from '../src/dockerDetection';
+  runtimeRemediation,
+} from '../src/runtimeDetection';
+import {
+  DOCKER_INSTALL_URL,
+  DOCKER_PROFILE,
+  PODMAN_INSTALL_URL,
+  PODMAN_PROFILE,
+} from '../src/runtimeProfiles';
 
-describe('classifyDockerProbe', () => {
+describe('classifyRuntimeProbe', () => {
   it('is available when the daemon answered the ping (no error)', () => {
-    assert.deepEqual(classifyDockerProbe({ pingError: undefined }), { kind: 'available' });
-    assert.deepEqual(classifyDockerProbe({ pingError: null }), { kind: 'available' });
+    assert.deepEqual(classifyRuntimeProbe({ pingError: undefined }), { kind: 'available' });
+    assert.deepEqual(classifyRuntimeProbe({ pingError: null }), { kind: 'available' });
   });
 
   it('is notInstalled when the socket is absent and the CLI is not on PATH', () => {
     const error = Object.assign(new Error('connect ENOENT /var/run/docker.sock'), {
       code: 'ENOENT',
     });
-    assert.deepEqual(classifyDockerProbe({ pingError: error, cliDetected: false }), {
+    assert.deepEqual(classifyRuntimeProbe({ pingError: error, cliDetected: false }), {
       kind: 'notInstalled',
     });
   });
@@ -29,7 +37,7 @@ describe('classifyDockerProbe', () => {
     const error = Object.assign(new Error('connect ECONNREFUSED /var/run/docker.sock'), {
       code: 'ECONNREFUSED',
     });
-    assert.deepEqual(classifyDockerProbe({ pingError: error }), { kind: 'notRunning' });
+    assert.deepEqual(classifyRuntimeProbe({ pingError: error }), { kind: 'notRunning' });
   });
 
   it('is notRunning when the CLI is installed even if the socket is missing (daemon stopped)', () => {
@@ -38,7 +46,7 @@ describe('classifyDockerProbe', () => {
     const error = Object.assign(new Error('connect ENOENT /var/run/docker.sock'), {
       code: 'ENOENT',
     });
-    assert.deepEqual(classifyDockerProbe({ pingError: error, cliDetected: true }), {
+    assert.deepEqual(classifyRuntimeProbe({ pingError: error, cliDetected: true }), {
       kind: 'notRunning',
     });
   });
@@ -47,20 +55,20 @@ describe('classifyDockerProbe', () => {
     const error = Object.assign(new Error('permission denied while trying to connect'), {
       code: 'EACCES',
     });
-    assert.deepEqual(classifyDockerProbe({ pingError: error }), {
+    assert.deepEqual(classifyRuntimeProbe({ pingError: error }), {
       kind: 'unknown',
       detail: 'permission denied while trying to connect',
     });
   });
 });
 
-describe('dockerRemediation', () => {
-  it('has nothing to remediate when Docker is available', () => {
-    assert.equal(dockerRemediation({ kind: 'available' }), undefined);
+describe('runtimeRemediation', () => {
+  it('has nothing to remediate when the runtime is available', () => {
+    assert.equal(runtimeRemediation({ kind: 'available' }, DOCKER_PROFILE), undefined);
   });
 
-  it('offers an Install Docker action pointing at the install docs when not installed', () => {
-    const remediation = dockerRemediation({ kind: 'notInstalled' });
+  it('offers an install action pointing at the runtime install docs when not installed', () => {
+    const remediation = runtimeRemediation({ kind: 'notInstalled' }, DOCKER_PROFILE);
     assert.ok(remediation);
     assert.match(remediation.message, /install/i);
     assert.deepEqual(remediation.action, {
@@ -70,48 +78,77 @@ describe('dockerRemediation', () => {
     });
   });
 
-  it('offers a Start Docker Desktop launch action when installed but stopped', () => {
-    const remediation = dockerRemediation({ kind: 'notRunning' });
+  it('offers a start action with the profile label when installed but stopped', () => {
+    const remediation = runtimeRemediation({ kind: 'notRunning' }, DOCKER_PROFILE, 'Start Docker Desktop');
     assert.ok(remediation);
     assert.match(remediation.message, /start/i);
     assert.deepEqual(remediation.action, {
-      kind: 'launchDockerDesktop',
+      kind: 'startRuntime',
       label: 'Start Docker Desktop',
     });
   });
 
+  it('falls back to manual guidance with no action when there is no start label', () => {
+    const remediation = runtimeRemediation({ kind: 'notRunning' }, DOCKER_PROFILE);
+    assert.ok(remediation);
+    assert.match(remediation.message, /start/i);
+    assert.equal(remediation.action, undefined);
+  });
+
   it('surfaces the raw detail (with no action) for an unknown failure', () => {
-    const remediation = dockerRemediation({ kind: 'unknown', detail: 'permission denied' });
+    const remediation = runtimeRemediation({ kind: 'unknown', detail: 'permission denied' }, DOCKER_PROFILE);
     assert.ok(remediation);
     assert.match(remediation.message, /permission denied/);
     assert.equal(remediation.action, undefined);
   });
+
+  it('tailors the wording and links to Podman for the Podman profile', () => {
+    const notInstalled = runtimeRemediation({ kind: 'notInstalled' }, PODMAN_PROFILE);
+    assert.ok(notInstalled);
+    assert.match(notInstalled.message, /Podman/);
+    assert.deepEqual(notInstalled.action, {
+      kind: 'openUrl',
+      label: 'Install Podman',
+      url: PODMAN_INSTALL_URL,
+    });
+
+    const notRunning = runtimeRemediation({ kind: 'notRunning' }, PODMAN_PROFILE, 'Start Podman machine');
+    assert.ok(notRunning);
+    assert.match(notRunning.message, /Podman/);
+    assert.deepEqual(notRunning.action, { kind: 'startRuntime', label: 'Start Podman machine' });
+  });
 });
 
-describe('dockerDesktopLaunch', () => {
-  it('opens the Docker app via `open -a` on macOS', () => {
-    assert.deepEqual(dockerDesktopLaunch('darwin'), { command: 'open', args: ['-a', 'Docker'] });
+describe('detectCli', () => {
+  let dir: string;
+
+  before(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pl-preview-cli-'));
+    fs.writeFileSync(path.join(dir, 'podman'), '');
+    fs.writeFileSync(path.join(dir, 'docker.exe'), '');
   });
 
-  it('points at the Docker Desktop executable under %ProgramFiles% on Windows', () => {
-    assert.deepEqual(dockerDesktopLaunch('win32', 'D:\\Programs'), {
-      command: 'D:\\Programs\\Docker\\Docker\\Docker Desktop.exe',
-      args: [],
-    });
+  after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('falls back to the standard Program Files path when %ProgramFiles% is unset', () => {
-    assert.deepEqual(dockerDesktopLaunch('win32'), {
-      command: 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe',
-      args: [],
-    });
-    // An empty string is treated as unset rather than producing a bare "\\Docker" path.
-    assert.equal(dockerDesktopLaunch('win32', '')?.command.startsWith('C:\\Program Files'), true);
+  it('finds an executable that is on PATH', () => {
+    assert.equal(detectCli(['podman'], { PATH: dir }, 'linux'), true);
   });
 
-  it('has no known launch command on Linux (engine-only) or other platforms', () => {
-    assert.equal(dockerDesktopLaunch('linux'), undefined);
-    assert.equal(dockerDesktopLaunch('aix'), undefined);
+  it('does not find an executable that is absent from PATH', () => {
+    assert.equal(detectCli(['docker'], { PATH: dir }, 'linux'), false);
+  });
+
+  it('tries the .exe suffix on Windows', () => {
+    // The temp dir only has `docker.exe`, which a win32 scan should find for `docker`.
+    assert.equal(detectCli(['docker'], { PATH: dir }, 'win32'), true);
+    assert.equal(detectCli(['docker'], { PATH: dir }, 'linux'), false);
+  });
+
+  it('returns false for an empty PATH', () => {
+    assert.equal(detectCli(['podman'], { PATH: '' }, 'linux'), false);
+    assert.equal(detectCli(['podman'], {}, 'linux'), false);
   });
 });
 

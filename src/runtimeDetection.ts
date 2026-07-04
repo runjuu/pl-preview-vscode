@@ -1,32 +1,43 @@
+import fs from 'node:fs';
+import path from 'node:path';
+
+import type { ContainerRuntimeProfile } from './runtimeProfiles';
+
 /**
- * Pure classification of Docker daemon availability and the actionable
+ * Pure classification of container-runtime availability and the actionable
  * remediation to show a first-run author. Kept free of dockerode/VSCode I/O so
- * the load-bearing decisions — "is Docker reachable, and if not what do we tell
- * the author" and "how do we render pull progress" — are unit-testable. The thin
- * dockerode adapter probes the daemon and the VSCode shell shows the notification
- * / progress; those are verified by driving the extension.
+ * the load-bearing decisions — "is the runtime reachable, and if not what do we
+ * tell the author" and "how do we render pull progress" — are unit-testable. The
+ * thin dockerode adapter probes the daemon and the VSCode shell shows the
+ * notification / progress; those are verified by driving the extension. The
+ * classifier is runtime-agnostic (a stopped Podman socket fails with the same
+ * codes as Docker, and both stream identical Docker-Engine-API pull events);
+ * only the remediation *wording* varies, so it is parameterized by a profile.
  */
 
-/** Whether Docker is reachable, and if not, which actionable state we are in. */
-export type DockerAvailability =
+/** Whether a runtime is reachable, and if not, which actionable state we are in. */
+export type RuntimeAvailability =
   | { readonly kind: 'available' }
-  /** No Docker socket and no `docker` CLI — Docker was never installed. */
+  /** No socket and no CLI on PATH — the runtime was never installed. */
   | { readonly kind: 'notInstalled' }
-  /** Docker is present but its daemon is not reachable — Docker Desktop is stopped. */
+  /** The runtime is present but its daemon/service is not reachable — it is stopped. */
   | { readonly kind: 'notRunning' }
   /** An unrecognized failure (e.g. a permission error); `detail` is the raw message. */
   | { readonly kind: 'unknown'; readonly detail: string };
 
-/** The signals the thin dockerode adapter gathers for {@link classifyDockerProbe}. */
-export interface DockerProbe {
+/** Backwards-compatible alias for the pre-multi-runtime name. */
+export type DockerAvailability = RuntimeAvailability;
+
+/** The signals the thin dockerode adapter gathers for {@link classifyRuntimeProbe}. */
+export interface RuntimeProbe {
   /** The error thrown by pinging the daemon, or `null`/`undefined` if it answered. */
   readonly pingError?: unknown;
   /**
-   * Whether the `docker` CLI was found on PATH. A stronger signal that Docker is
-   * installed-but-stopped than the socket error alone: Docker Desktop removes its
-   * managed socket when it stops, so an `ENOENT` from a machine that clearly has
-   * the CLI means "not running", not "not installed". Optional — when absent we
-   * classify from the socket error code alone.
+   * Whether the runtime's CLI was found on PATH. A stronger signal that the
+   * runtime is installed-but-stopped than the socket error alone: Docker Desktop
+   * removes its managed socket when it stops, so an `ENOENT` from a machine that
+   * clearly has the CLI means "not running", not "not installed". Optional — when
+   * absent we classify from the socket error code alone.
    */
   readonly cliDetected?: boolean;
 }
@@ -35,7 +46,7 @@ export interface DockerProbe {
  * Classify a daemon-ping outcome into an actionable availability. Pure: the thin
  * adapter supplies the ping error and (best-effort) CLI signal; this decides.
  */
-export function classifyDockerProbe(probe: DockerProbe): DockerAvailability {
+export function classifyRuntimeProbe(probe: RuntimeProbe): RuntimeAvailability {
   if (probe.pingError == null) return { kind: 'available' };
 
   // The CLI is on PATH but the daemon is unreachable → installed but stopped.
@@ -52,93 +63,87 @@ export function classifyDockerProbe(probe: DockerProbe): DockerAvailability {
   return { kind: 'unknown', detail: errorMessage(probe.pingError) };
 }
 
-/** Where to send an author who needs to install Docker. */
-export const DOCKER_INSTALL_URL = 'https://docs.docker.com/get-docker/';
-
 /**
  * The action button a remediation offers, when there is one:
  * - `openUrl` sends the author to an external page (the install docs).
- * - `launchDockerDesktop` starts the already-installed Docker Desktop app; the
- *   shell then waits for the daemon and continues into the preview. Whether this
- *   button is actually surfaced depends on the platform — see
- *   {@link dockerDesktopLaunch}.
+ * - `startRuntime` starts the already-installed runtime (Docker Desktop, a Podman
+ *   machine, or a user service); the shell then waits for the daemon and
+ *   continues into the preview. Whether this button is surfaced depends on the
+ *   platform — the profile decides via its `startAction`.
  */
-export type DockerRemediationAction =
+export type RuntimeRemediationAction =
   | { readonly kind: 'openUrl'; readonly label: string; readonly url: string }
-  | { readonly kind: 'launchDockerDesktop'; readonly label: string };
+  | { readonly kind: 'startRuntime'; readonly label: string };
 
-/** An actionable notification for a non-available Docker state. */
-export interface DockerRemediation {
+/** An actionable notification for a non-available runtime state. */
+export interface RuntimeRemediation {
   /** One-sentence, actionable summary shown in the notification. */
   readonly message: string;
   /** Primary action button, when there is a concrete fix to offer. */
-  readonly action?: DockerRemediationAction;
+  readonly action?: RuntimeRemediationAction;
 }
 
+/** The profile fields {@link runtimeRemediation} needs to word its message. */
+export type RemediationProfile = Pick<ContainerRuntimeProfile, 'displayName' | 'installUrl'>;
+
 /**
- * The actionable message (and optional action button) for a non-available Docker
- * state, or `undefined` when Docker is available — nothing to remediate. The
- * shell shows this instead of proceeding into a cryptic socket error.
+ * The actionable message (and optional action button) for a non-available runtime
+ * state, or `undefined` when it is available — nothing to remediate. The shell
+ * shows this instead of proceeding into a cryptic socket error. `startLabel` is
+ * the profile's platform-specific start action label (e.g. "Start Docker Desktop"
+ * / "Start Podman machine"); when omitted, the "not running" message falls back
+ * to manual guidance with no button.
  */
-export function dockerRemediation(
-  availability: DockerAvailability,
-): DockerRemediation | undefined {
+export function runtimeRemediation(
+  availability: RuntimeAvailability,
+  profile: RemediationProfile,
+  startLabel?: string,
+): RuntimeRemediation | undefined {
+  const { displayName, installUrl } = profile;
   switch (availability.kind) {
     case 'available':
       return undefined;
     case 'notInstalled':
       return {
-        message:
-          'Docker is required to render previews, but it was not found. Install Docker Desktop, then run the preview again.',
-        action: { kind: 'openUrl', label: 'Install Docker', url: DOCKER_INSTALL_URL },
+        message: `${displayName} is required to render previews, but it was not found. Install ${displayName}, then run the preview again.`,
+        action: installUrl ? { kind: 'openUrl', label: `Install ${displayName}`, url: installUrl } : undefined,
       };
     case 'notRunning':
       return {
-        message:
-          'Docker is installed but not running. Start Docker Desktop, then run the preview again.',
-        action: { kind: 'launchDockerDesktop', label: 'Start Docker Desktop' },
+        message: `${displayName} is installed but not running. Start ${displayName}, then run the preview again.`,
+        action: startLabel ? { kind: 'startRuntime', label: startLabel } : undefined,
       };
     case 'unknown':
       return {
-        message: `Could not reach the Docker daemon: ${availability.detail}. Make sure Docker is installed and running, then run the preview again.`,
+        message: `Could not reach ${displayName}: ${availability.detail}. Make sure ${displayName} is installed and running, then run the preview again.`,
       };
   }
 }
 
-/** How to start the Docker Desktop application on a given platform. */
-export interface DockerDesktopLaunch {
-  /** Executable or launcher to spawn (e.g. `open`, or the `Docker Desktop.exe` path). */
-  readonly command: string;
-  /** Arguments passed to {@link command}. */
-  readonly args: readonly string[];
-}
-
 /**
- * The command that starts the Docker Desktop application on `platform`, or
- * `undefined` where we can't reliably launch it: on Linux the engine is usually a
- * privileged system service rather than a GUI app, so there (and on any other
- * platform) the author is told to start Docker manually. Pure so the per-platform
- * choice is unit-tested; the shell spawns the result — and, on Windows, only
- * surfaces the button once it confirms the executable is actually present.
- *
- * @param programFiles the Windows `%ProgramFiles%` directory; defaults to the
- *   standard `C:\Program Files` when unset.
+ * Best-effort check for one of `names` on PATH — a signal that a runtime is
+ * installed (so an unreachable daemon means "not running", not "not installed").
+ * Scans PATH rather than spawning so it stays cheap and side-effect-free. On
+ * Windows the executable extensions are tried too.
  */
-export function dockerDesktopLaunch(
-  platform: NodeJS.Platform,
-  programFiles?: string,
-): DockerDesktopLaunch | undefined {
-  switch (platform) {
-    case 'darwin':
-      // `open -a Docker` launches Docker Desktop and returns immediately.
-      return { command: 'open', args: ['-a', 'Docker'] };
-    case 'win32': {
-      const base = programFiles && programFiles.length > 0 ? programFiles : 'C:\\Program Files';
-      return { command: `${base}\\Docker\\Docker\\Docker Desktop.exe`, args: [] };
+export function detectCli(
+  names: readonly string[],
+  env: Record<string, string | undefined> = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const candidates =
+    platform === 'win32' ? names.flatMap((name) => [`${name}.exe`, `${name}.com`, name]) : names;
+  for (const dir of (env.PATH ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const name of candidates) {
+      try {
+        if (fs.existsSync(path.join(dir, name))) return true;
+      } catch {
+        /* unreadable PATH entry; keep scanning */
+      }
     }
-    default:
-      return undefined;
   }
+  return false;
 }
 
 /** One progress event from a dockerode image pull. */

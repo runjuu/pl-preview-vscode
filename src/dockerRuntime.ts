@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 
@@ -11,34 +10,39 @@ import {
   resolvePublishedPort,
 } from './containerSpec';
 import {
-  type DockerAvailability,
   type DockerPullEvent,
   PullProgressAggregator,
-  classifyDockerProbe,
+  type RuntimeAvailability,
+  classifyRuntimeProbe,
+  detectCli,
   formatPullStatus,
-} from './dockerDetection';
+} from './runtimeDetection';
 import { previewOrigin } from './previewUrl';
 import type { PreviewStartupProgress } from './startupProgress';
 
 /**
  * Thin dockerode adapter: launches and tears down Local Preview Containers.
  *
- * This is the imperative shell around the pure `containerSpec` contract — it
- * owns the real Docker I/O (create/start/pull/inspect/logs/remove) and readiness
- * polling, and is deliberately *not* unit-tested (verified by driving the
- * extension). It keys containers by course root and exposes `ensureRunning` /
- * `stop` / `stopAll`; the warm-pool *policy* (LRU cap, idle reaping, dispose-all)
- * lives in the `PreviewController`, which drives these ports.
+ * This is the imperative shell around the pure `containerSpec` contract — it owns
+ * the real Docker Engine API I/O (create/start/pull/inspect/logs/remove) and
+ * readiness polling, and is deliberately *not* unit-tested (verified by driving
+ * the extension). The API is the same for every supported runtime (Docker,
+ * Podman, and the Docker-socket-compatible engines), so this one adapter serves
+ * all of them — the shell just injects a `docker` client built for the resolved
+ * endpoint and the runtime's `cliNames`. It keys containers by course root and
+ * exposes `ensureRunning` / `stop` / `stopAll`; the warm-pool *policy* (LRU cap,
+ * idle reaping, dispose-all) lives in the `PreviewController`, which drives these
+ * ports.
  */
 
 /** How the extension observes and controls preview containers. */
 export interface PreviewRuntime {
   /**
-   * Report whether the Docker daemon is reachable, so the shell can guide a
-   * first-run author (install/start Docker) instead of proceeding into a cryptic
-   * socket error.
+   * Report whether the runtime's daemon is reachable, so the shell can guide a
+   * first-run author (install/start the runtime) instead of proceeding into a
+   * cryptic socket error.
    */
-  checkAvailability(): Promise<DockerAvailability>;
+  checkAvailability(): Promise<RuntimeAvailability>;
   /**
    * Start (or reuse) the container for a course and return its loopback port,
    * reporting cold-start progress (pull → start → readiness) through `onProgress`
@@ -59,6 +63,12 @@ export interface DockerPreviewRuntimeOptions {
   image?: string;
   /** Injectable dockerode client (defaults to the local Docker socket). */
   docker?: Docker;
+  /**
+   * CLI executable names that signal the runtime is installed, used by
+   * {@link DockerPreviewRuntime.checkAvailability} to tell "installed but stopped"
+   * apart from "not installed". Defaults to `['docker']`.
+   */
+  cliNames?: readonly string[];
   /** Sink for container stdout/stderr and lifecycle notes (Output channel in prod). */
   log?: (line: string) => void;
 }
@@ -75,28 +85,30 @@ interface RunningContainer {
 export class DockerPreviewRuntime implements PreviewRuntime {
   private readonly docker: Docker;
   private readonly image: string;
+  private readonly cliNames: readonly string[];
   private readonly log: (line: string) => void;
   private readonly running = new Map<string, RunningContainer>();
 
   constructor(options: DockerPreviewRuntimeOptions = {}) {
     this.docker = options.docker ?? new Docker();
     this.image = options.image ?? resolvePreviewImage();
+    this.cliNames = options.cliNames ?? ['docker'];
     this.log = options.log ?? (() => {});
   }
 
   /**
-   * Ping the Docker daemon and classify the outcome. When the ping fails we add a
-   * best-effort "is the `docker` CLI on PATH" signal so a stopped Docker Desktop
-   * (CLI present, socket gone) is reported as "not running" rather than "not
+   * Ping the runtime's daemon and classify the outcome. When the ping fails we add
+   * a best-effort "is the runtime's CLI on PATH" signal so a stopped daemon (CLI
+   * present, socket gone) is reported as "not running" rather than "not
    * installed". The classification decision itself is the pure
-   * {@link classifyDockerProbe}.
+   * {@link classifyRuntimeProbe}.
    */
-  async checkAvailability(): Promise<DockerAvailability> {
+  async checkAvailability(): Promise<RuntimeAvailability> {
     try {
       await this.docker.ping();
       return { kind: 'available' };
     } catch (pingError) {
-      return classifyDockerProbe({ pingError, cliDetected: detectDockerCli() });
+      return classifyRuntimeProbe({ pingError, cliDetected: detectCli(this.cliNames) });
     }
   }
 
@@ -250,26 +262,6 @@ export function previewCourseId(courseRoot: string): string {
     hash = (hash * 31 + char.charCodeAt(0)) | 0;
   }
   return `${base}-${(hash >>> 0).toString(36)}`;
-}
-
-/**
- * Best-effort check for a `docker` executable on PATH — a signal that Docker is
- * installed (so an unreachable daemon means "not running", not "not installed").
- * Scans PATH rather than spawning so it stays cheap and side-effect-free.
- */
-function detectDockerCli(): boolean {
-  const names = process.platform === 'win32' ? ['docker.exe', 'docker.com', 'docker'] : ['docker'];
-  for (const dir of (process.env.PATH ?? '').split(path.delimiter)) {
-    if (!dir) continue;
-    for (const name of names) {
-      try {
-        if (fs.existsSync(path.join(dir, name))) return true;
-      } catch {
-        /* unreadable PATH entry; keep scanning */
-      }
-    }
-  }
-  return false;
 }
 
 function probe(origin: string): Promise<boolean> {
