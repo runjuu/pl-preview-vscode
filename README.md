@@ -1,6 +1,7 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/runjuu/pl-preview-vscode/main/media/icon-original.png" alt="PL Preview icon" width="180">
   <h1>PL Preview for VS Code</h1>
+  <p><strong>Live, in-editor PrairieLearn question previews — rendered beside your code as you write.</strong></p>
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=runjuu.pl-preview-vscode"><img alt="VS Code Marketplace" src="https://vsmarketplacebadges.dev/version-short/runjuu.pl-preview-vscode.svg?label=VS%20Code%20Marketplace"></a>
     <a href="https://open-vsx.org/extension/runjuu/pl-preview-vscode"><img alt="Open VSX Version" src="https://img.shields.io/open-vsx/v/runjuu/pl-preview-vscode?label=Open%20VSX"></a>
@@ -10,11 +11,32 @@
   </p>
 </div>
 
-Preview PrairieLearn questions beside the files you are editing. PL Preview starts
-a local container-backed preview server for your course — using Docker or Podman —
-and renders the active question in a VS Code webview.
+Preview PrairieLearn questions **beside the files you are editing** without
+running a full local instance, clicking *Load from disk*, or reloading a browser
+tab after every change. PL Preview uses Docker or Podman to start a local,
+container-backed preview server for your course, then renders the active
+question in a VS Code webview that refreshes when you save.
 
 [![PL Preview demo](https://raw.githubusercontent.com/runjuu/pl-preview-vscode/main/media/demo-preview.gif)](https://github.com/runjuu/pl-preview-vscode/raw/main/media/demo.mp4)
+
+## Why PL Preview?
+
+If you author or TA a PrairieLearn course, you know the loop: edit a question,
+switch to the browser, click **Load from disk**, reload, maybe reroll a variant,
+and then check whether one small change worked. PL Preview is a live preview
+extension for PrairieLearn in VS Code, and it shortens that loop:
+
+- **Stay in your editor.** The rendered question stays beside your source and follows
+  the active question as you move between `question.html`, `server.py`, and
+  `info.json`.
+- **Save to see changes.** Edits render on save with a stable variant seed, so
+  before and after are easy to compare. Need a new variant? Use **New variant**.
+- **Skip the setup.** Open a course folder with `infoCourse.json`; PL Preview
+  auto-detects Docker or Podman and manages the preview server for you.
+
+PL Preview is an independent, open-source companion to PrairieLearn's authoring
+tools, built for instructors, TAs, and course developers writing v3/Freeform
+questions.
 
 ## Features
 

@@ -1,22 +1,50 @@
 {
   "name": "pl-preview-vscode",
-  "displayName": "PL Preview",
-  "description": "Live, editor-native preview of PrairieLearn questions, rendered by a local Docker- or Podman-backed preview server.",
+  "displayName": "PL Preview — Live PrairieLearn Question Preview",
+  "description": "Preview PrairieLearn questions side by side in VS Code. Save your edits and the rendered question refreshes instantly from a local server running in Docker or Podman.",
   "version": "1.0.0",
   "publisher": "runjuu",
   "license": "MIT",
   "icon": "media/icon.png",
+  "pricing": "Free",
+  "homepage": "https://github.com/runjuu/pl-preview-vscode#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/runjuu/pl-preview-vscode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/runjuu/pl-preview-vscode/issues"
   },
   "engines": {
     "vscode": "^1.90.0",
     "node": ">=24"
   },
   "categories": [
-    "Other"
+    "Education",
+    "Visualization"
   ],
+  "keywords": [
+    "PrairieLearn",
+    "PL",
+    "PrairieLearn VS Code extension",
+    "question",
+    "preview",
+    "live preview",
+    "authoring",
+    "instructor",
+    "teaching",
+    "education",
+    "assessment",
+    "autograder",
+    "freeform",
+    "course",
+    "Docker",
+    "Podman"
+  ],
+  "galleryBanner": {
+    "color": "#0e2a3b",
+    "theme": "dark"
+  },
   "main": "./out/extension.js",
   "activationEvents": [
     "workspaceContains:**/infoCourse.json"
