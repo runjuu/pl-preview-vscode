@@ -67,12 +67,14 @@
     "watch": "pnpm run bundle -- --watch",
     "typecheck": "tsc -p ./tsconfig.json",
     "test": "tsx --test tests/*.test.ts",
+    "test:coverage": "c8 node --import tsx --test tests/*.test.ts",
     "vscode:prepublish": "pnpm run build"
   },
   "devDependencies": {
     "@types/dockerode": "^4.0.1",
     "@types/node": "^24.10.1",
     "@types/vscode": "^1.90.0",
+    "c8": "^11.0.0",
     "esbuild": "^0.28.1",
     "tsx": "^4.21.0",
     "typescript": "^5.7.3"

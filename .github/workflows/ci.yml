@@ -1,0 +1,91 @@
+name: CI
+
+# Typecheck + tests on every push and PR. On pushes to main we additionally
+# publish a line-coverage badge (c8 over all of src) to the orphan `badges`
+# branch as a shields.io endpoint — self-contained: no external service, no PAT,
+# just the built-in GITHUB_TOKEN.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only by default; only the badge job opts into contents: write.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      pct: ${{ steps.coverage.outputs.pct }}
+      color: ${{ steps.coverage.outputs.color }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test with coverage
+        run: pnpm run test:coverage
+
+      - name: Read coverage
+        id: coverage
+        run: |
+          PCT=$(node -p "Math.round(require('./coverage/coverage-summary.json').total.lines.pct)")
+          # shields colour ramp: brightgreen ≥90 … red <50
+          if   [ "$PCT" -ge 90 ]; then COLOR=brightgreen
+          elif [ "$PCT" -ge 80 ]; then COLOR=green
+          elif [ "$PCT" -ge 70 ]; then COLOR=yellowgreen
+          elif [ "$PCT" -ge 60 ]; then COLOR=yellow
+          elif [ "$PCT" -ge 50 ]; then COLOR=orange
+          else                         COLOR=red
+          fi
+          echo "pct=$PCT" >> "$GITHUB_OUTPUT"
+          echo "color=$COLOR" >> "$GITHUB_OUTPUT"
+          echo "### Coverage: ${PCT}% of lines" >> "$GITHUB_STEP_SUMMARY"
+
+  # Publish the shields endpoint JSON to the orphan `badges` branch. Force-pushes
+  # a single-commit history each run so the branch never accumulates noise, and
+  # keeps the badge out of main's history. Only runs on main (never on PRs, where
+  # the token is read-only anyway).
+  badge:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Publish coverage badge
+        env:
+          PCT: ${{ needs.test.outputs.pct }}
+          COLOR: ${{ needs.test.outputs.color }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BADGE_DIR="$(mktemp -d)"
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' \
+            "$PCT" "$COLOR" > "$BADGE_DIR/coverage.json"
+          cd "$BADGE_DIR"
+          git init -q
+          git checkout -q -b badges
+          git add coverage.json
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "chore(ci): coverage ${PCT}%"
+          git push -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges

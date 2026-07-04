@@ -3,6 +3,8 @@
 .gitignore
 node_modules/**
 out/**
+coverage/**
+.c8rc.json
 *.vsix
 media/demo-preview.gif
 media/demo.mp4

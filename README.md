@@ -4,6 +4,7 @@
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=runjuu.pl-preview-vscode"><img alt="VS Code Marketplace" src="https://vsmarketplacebadges.dev/version-short/runjuu.pl-preview-vscode.svg?label=VS%20Code%20Marketplace"></a>
     <a href="https://open-vsx.org/extension/runjuu/pl-preview-vscode"><img alt="Open VSX Version" src="https://img.shields.io/open-vsx/v/runjuu/pl-preview-vscode?label=Open%20VSX"></a>
+    <a href="https://github.com/runjuu/pl-preview-vscode/actions/workflows/ci.yml"><img alt="Coverage" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/runjuu/pl-preview-vscode/badges/coverage.json"></a>
     <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
     <a href="https://code.visualstudio.com/"><img alt="VS Code" src="https://img.shields.io/badge/VS%20Code-%5E1.90.0-007ACC"></a>
   </p>

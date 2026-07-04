@@ -1,5 +1,6 @@
 node_modules/
 out/
+coverage/
 *.tsbuildinfo
 .vscode-test/
 .DS_Store
