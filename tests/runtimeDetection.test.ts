@@ -186,7 +186,7 @@ describe('formatPullStatus', () => {
 });
 
 describe('PullProgressAggregator', () => {
-  it('reports no percent until a layer reveals a download total', () => {
+  it('reports no percent while layers are only announced (not yet downloading or done)', () => {
     const aggregate = new PullProgressAggregator();
     assert.equal(aggregate.add({ status: 'Pulling fs layer', id: 'a' }).percent, undefined);
     const snapshot = aggregate.add({ status: 'Waiting', id: 'b' });
@@ -195,18 +195,38 @@ describe('PullProgressAggregator', () => {
     assert.equal(snapshot.layersDone, 0);
   });
 
-  it('aggregates download bytes across layers as their totals arrive incrementally', () => {
+  it('averages layer completion, so one layer’s size can’t dominate the number', () => {
     const aggregate = new PullProgressAggregator();
     aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 25, total: 100 } });
-    // Only layer a is sized so far: 50/100 = 50%.
+    // Only layer a is known so far, and it is half done → 50%.
     assert.equal(
       aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 50, total: 100 } }).percent,
       50,
     );
-    // Layer b joins with its own total; overall = (50 + 0) / (100 + 100) = 25%.
-    const snapshot = aggregate.add({ status: 'Downloading', id: 'b', progressDetail: { current: 0, total: 100 } });
+    // Layer b joins — three times a's size, but only just started. Because layers
+    // are weighted equally (not by bytes), overall = (0.5 + 0) / 2 = 25%; a byte
+    // denominator would instead read 50 / (100 + 300) ≈ 13% and keep sliding.
+    const snapshot = aggregate.add({ status: 'Downloading', id: 'b', progressDetail: { current: 0, total: 300 } });
     assert.equal(snapshot.percent, 25);
     assert.equal(snapshot.layersTotal, 2);
+  });
+
+  it('never goes backwards when a finished layer is followed by a newly-sized larger one', () => {
+    // The reported regression: the bar climbs to ~100% then snaps back to ~20%.
+    // Docker announces every layer up front, then transfers a few at a time, and a
+    // small layer can finish before a big one reveals its (much larger) size.
+    const aggregate = new PullProgressAggregator();
+    aggregate.add({ status: 'Pulling fs layer', id: 'a' });
+    aggregate.add({ status: 'Pulling fs layer', id: 'b' });
+    // Small layer a downloads and completes: 1 of 2 layers done → 50%.
+    aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 10, total: 10 } });
+    assert.equal(aggregate.add({ status: 'Pull complete', id: 'a' }).percent, 50);
+    // Big layer b reveals a far larger size and barely starts. Byte-weighting would
+    // crater the percent (10 / (10 + 40) = 20%); layer-weighting only ticks it up:
+    // (1 + 0.1) / 2 = 55%.
+    const started = aggregate.add({ status: 'Downloading', id: 'b', progressDetail: { current: 4, total: 40 } });
+    assert.equal(started.percent, 55);
+    assert.ok(started.percent != null && started.percent >= 50, 'progress must not go backwards');
   });
 
   it('keeps the percent on the download basis after a layer moves to extraction', () => {
@@ -218,14 +238,14 @@ describe('PullProgressAggregator', () => {
     assert.equal(snapshot.percent, 100);
   });
 
-  it('counts a cached "Already exists" layer as done with no bytes', () => {
+  it('counts a cached "Already exists" layer as a fully complete layer', () => {
     const aggregate = new PullProgressAggregator();
     aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 50, total: 100 } });
     const snapshot = aggregate.add({ status: 'Already exists', id: 'b' });
     assert.equal(snapshot.layersTotal, 2);
     assert.equal(snapshot.layersDone, 1);
-    // b contributes no bytes to the denominator; the percent stays a's 50/100.
-    assert.equal(snapshot.percent, 50);
+    // a is half done, b is a fully cached layer → (0.5 + 1) / 2 = 75%.
+    assert.equal(snapshot.percent, 75);
   });
 
   it('marks a layer done on Pull complete and tops its bytes off to 100%', () => {

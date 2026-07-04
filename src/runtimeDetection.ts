@@ -181,7 +181,11 @@ function clampPercent(value: number): number {
 
 /** The aggregate download progress across all layers of an in-flight pull. */
 export interface PullProgressSnapshot {
-  /** Overall download percentage across sized layers, or `undefined` until any total is known. */
+  /**
+   * Overall completion, averaged across every announced layer, or `undefined`
+   * until at least one layer is downloading or done (before that the bar is
+   * indeterminate).
+   */
   readonly percent?: number;
   /** Layers that have finished pulling (including cached "Already exists" layers). */
   readonly layersDone: number;
@@ -201,11 +205,20 @@ interface LayerDownload {
  * the "Starting preview…" stepper can show one moving number instead of the
  * per-layer churn `formatPullStatus` emits for the log.
  *
- * Keyed by layer `id`, it counts **download** bytes only — the network transfer is
- * the slow part; extraction is fast and reports the far larger *uncompressed* size,
- * so folding its total in would corrupt the denominator. A layer therefore only
- * enters the percentage once a `Downloading` event reveals its compressed total,
- * and later phases (`Extracting`, `Pull complete`, …) only ever mark it complete.
+ * Progress is the **average completion across layers**, each weighted equally: a
+ * layer's completion is its download-byte fraction while transferring, or a full
+ * `1` once done/cached. Weighting by layer count — not by bytes — is what keeps the
+ * number climbing smoothly. Docker reveals a layer's compressed size only when that
+ * layer *starts* downloading, so a byte denominator grows mid-pull and the percent
+ * lurches *backwards* the moment a large layer begins after a small one finished
+ * (it races toward 100%, then snaps back). The layer *set*, by contrast, is
+ * announced up front (`Pulling fs layer` / `Waiting`), so a layer-count denominator
+ * is stable and a newly-sized layer can only add to the numerator.
+ *
+ * Within a layer we still track **download** bytes only: extraction is fast and
+ * reports the far larger *uncompressed* size, so a layer only takes on a byte total
+ * from a `Downloading` event, and later phases (`Extracting`, `Pull complete`, …)
+ * only top it off or mark it complete.
  */
 export class PullProgressAggregator {
   private readonly layers = new Map<string, LayerDownload>();
@@ -245,20 +258,28 @@ export class PullProgressAggregator {
   }
 
   private snapshot(): PullProgressSnapshot {
-    let sumCurrent = 0;
-    let sumTotal = 0;
+    let completion = 0;
     let layersDone = 0;
+    let measurable = false;
     for (const layer of this.layers.values()) {
-      if (layer.done) layersDone += 1;
-      if (layer.total > 0) {
-        sumCurrent += layer.current;
-        sumTotal += layer.total;
+      if (layer.done) {
+        layersDone += 1;
+        completion += 1;
+        measurable = true;
+      } else if (layer.total > 0) {
+        completion += Math.min(1, layer.current / layer.total);
+        measurable = true;
       }
+      // A layer that has only been announced (no size, not done) contributes 0 but
+      // still counts toward the denominator, so its later sizing can't shrink the
+      // percent — the fix for the "climbs to ~100% then snaps back" regression.
     }
+    const layersTotal = this.layers.size;
     return {
-      percent: sumTotal > 0 ? clampPercent((sumCurrent / sumTotal) * 100) : undefined,
+      // `measurable` implies at least one layer, so the divide is safe.
+      percent: measurable ? clampPercent((completion / layersTotal) * 100) : undefined,
       layersDone,
-      layersTotal: this.layers.size,
+      layersTotal,
     };
   }
 }
