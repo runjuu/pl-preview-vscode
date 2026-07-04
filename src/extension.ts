@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,11 +16,14 @@ import {
   REFRESH_PREVIEW_COMMAND,
   SHOW_LOGS_COMMAND,
   STOP_SERVERS_COMMAND,
+  WORKSPACE_PANEL_TITLE,
+  WORKSPACE_VIEW_TYPE,
   emptyPanelHtml,
   errorPanelHtml,
   notPreviewablePanelHtml,
   previewPanelHtml,
   startingPanelHtml,
+  workspacePanelHtml,
 } from './panel';
 import {
   type Clock,
@@ -29,6 +33,7 @@ import {
   type PreviewViewSink,
   type PreviewViewState,
 } from './previewController';
+import { PreviewProxy } from './previewProxy';
 import { PREVIEWABLE_CONTEXT_KEY, PreviewabilityWatcher } from './previewability';
 import {
   type RuntimeAvailability,
@@ -67,7 +72,9 @@ import { describeStartupProgress } from './startupProgress';
  */
 
 let panel: vscode.WebviewPanel | undefined;
+const workspacePanels = new Map<string, vscode.WebviewPanel>();
 let controller: PreviewController | undefined;
+let previewSink: WebviewPreviewSink | undefined;
 let runtime: DockerPreviewRuntime | undefined;
 /** The runtime profile + endpoint bound this session, so remediation can be tailored. */
 let selectedProfile: ContainerRuntimeProfile | undefined;
@@ -138,6 +145,13 @@ class WebviewPreviewSink implements PreviewViewSink {
   private reloadNonce = 0;
 
   /**
+   * Local reverse proxies, keyed by the real preview-server port they front.
+   * Values are startup promises so concurrent renders for the same port cannot
+   * create competing proxy servers.
+   */
+  private readonly proxies = new Map<number, Promise<PreviewProxy>>();
+
+  /**
    * Loopback port of the container behind the currently mounted preview document,
    * or `undefined` when the panel shows a non-preview state. A re-render for this
    * same port updates the iframe in place (via a message) instead of reassigning
@@ -146,6 +160,15 @@ class WebviewPreviewSink implements PreviewViewSink {
    * port mapping baked into the HTML must be rebuilt.
    */
   private previewPort: number | undefined;
+
+  /** Cancels stale async proxy starts when a newer render wins the panel. */
+  private renderToken = 0;
+
+  /** Per-mounted preview document token for host-to-webview update messages. */
+  private previewMessageToken = randomMessageToken();
+
+  /** Token accepted from workspace-link bridge messages injected by the proxy. */
+  private readonly workspaceBridgeToken = randomMessageToken();
 
   /**
    * Whether the live "Starting preview…" overview doc is currently mounted. While
@@ -198,34 +221,86 @@ class WebviewPreviewSink implements PreviewViewSink {
             if (choice === 'Show logs') this.output.show(true);
           });
         return;
-      case 'preview': {
-        const url = new URL(state.url);
-        const port = Number(url.port);
-        // Cache-bust so a save-refresh at the same URL still reloads the iframe;
-        // the preview server ignores this unknown param (only `variant` matters).
-        url.searchParams.set('__plReload', String(++this.reloadNonce));
-        const src = url.toString();
-        // Same container as the mounted preview? Swap the iframe in place with a
-        // message — reassigning webview.html would reload the whole panel and
-        // flash. Only a new port needs a fresh document (new frame-src / mapping).
-        if (this.previewPort === port) {
-          void this.view.webview.postMessage({ type: 'render', src, variant: state.variant });
-          return;
-        }
-        this.previewPort = port;
-        // Leaving the live overview: this rebuild bypasses showDocument, so clear
-        // the flag here too or the next starting tick would post into this doc.
-        this.showingStarting = false;
-        // Forward the container's loopback port through the webview so the iframe
-        // can reach it (the CSP frame-src in previewPanelHtml permits that origin).
-        this.view.webview.options = {
-          enableScripts: true,
-          portMapping: [{ webviewPort: port, extensionHostPort: port }],
-        };
-        this.view.webview.html = previewPanelHtml({ src, variant: state.variant });
+      case 'preview':
+        void this.showPreview(state);
         return;
-      }
     }
+  }
+
+  private async showPreview(state: Extract<PreviewViewState, { kind: 'preview' }>): Promise<void> {
+    const token = ++this.renderToken;
+    const url = new URL(state.url);
+    const port = Number(url.port);
+    // Cache-bust so a save-refresh at the same URL still reloads the iframe;
+    // the preview server ignores this unknown param (only `variant` matters).
+    url.searchParams.set('__plReload', String(++this.reloadNonce));
+    const targetSrc = url.toString();
+
+    let proxy: PreviewProxy;
+    try {
+      proxy = await this.ensureProxy(port, url.origin);
+    } catch (err) {
+      if (token !== this.renderToken) return;
+      this.output.appendLine(`[pl-preview] could not start preview proxy: ${formatError(err)}`);
+      this.showDocument(errorPanelHtml('Could not start the local preview proxy'));
+      return;
+    }
+    if (token !== this.renderToken) return;
+
+    const src = proxy.urlFor(targetSrc);
+    // Same container/proxy as the mounted preview? Swap the iframe in place with a
+    // message — reassigning webview.html would reload the whole panel and flash.
+    if (this.previewPort === port) {
+      void this.view.webview.postMessage({
+        type: 'render',
+        token: this.previewMessageToken,
+        src,
+        variant: state.variant,
+      });
+      return;
+    }
+
+    this.previewPort = port;
+    this.previewMessageToken = randomMessageToken();
+    // Leaving the live overview: this rebuild bypasses showDocument, so clear
+    // the flag here too or the next starting tick would post into this doc.
+    this.showingStarting = false;
+    // Forward the proxy's loopback port through the webview. The proxy then
+    // forwards to the real preview server and rewrites workspace links in HTML.
+    this.view.webview.options = {
+      enableScripts: true,
+      portMapping: [{ webviewPort: proxy.port, extensionHostPort: proxy.port }],
+    };
+    this.view.webview.html = previewPanelHtml({
+      hostMessageToken: this.previewMessageToken,
+      src,
+      variant: state.variant,
+      workspaceBridgeToken: this.workspaceBridgeToken,
+      workspaceTargetOrigin: url.origin,
+    });
+  }
+
+  private async ensureProxy(port: number, targetOrigin: string): Promise<PreviewProxy> {
+    const existing = this.proxies.get(port);
+    if (existing) return existing;
+
+    const proxy = new PreviewProxy({
+      log: (line) => this.output.appendLine(line),
+      targetOrigin,
+      workspaceBridgeToken: this.workspaceBridgeToken,
+    });
+    const started = proxy
+      .start()
+      .then(() => proxy)
+      .catch((err) => {
+        if (this.proxies.get(port) === started) {
+          this.proxies.delete(port);
+        }
+        void proxy.dispose().catch(() => undefined);
+        throw err;
+      });
+    this.proxies.set(port, started);
+    return started;
   }
 
   /**
@@ -234,10 +309,20 @@ class WebviewPreviewSink implements PreviewViewSink {
    * HTML fresh rather than messaging a document that is no longer there.
    */
   private showDocument(html: string): void {
+    this.renderToken++;
     this.previewPort = undefined;
     this.showingStarting = false;
     this.view.webview.options = { enableScripts: true };
     this.view.webview.html = html;
+  }
+
+  dispose(): void {
+    this.renderToken++;
+    const proxies = [...this.proxies.values()];
+    this.proxies.clear();
+    for (const proxy of proxies) {
+      void proxy.then((startedProxy) => startedProxy.dispose()).catch(() => undefined);
+    }
   }
 }
 
@@ -254,12 +339,17 @@ function ensurePanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
     { enableScripts: true, retainContextWhenHidden: true },
   );
 
-  // The rendered-question toolbar's "New variant" button posts back here; reroll
-  // through the controller, the same path as the Command Palette command.
+  // The rendered-question toolbar posts back here: "New variant" rerolls through
+  // the controller, and "Open workspace" opens the discovered workspace page in
+  // its own VS Code tab.
   panel.webview.onDidReceiveMessage(
-    (message: { type?: string } | undefined) => {
+    (message: { type?: string; url?: string } | undefined) => {
       if (message?.type === 'newVariant') {
         void controller?.newVariant();
+        return;
+      }
+      if (message?.type === 'openWorkspace' && typeof message.url === 'string') {
+        openWorkspacePanel(context, message.url);
       }
     },
     null,
@@ -269,6 +359,7 @@ function ensurePanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
   panel.onDidDispose(
     () => {
       panel = undefined;
+      disposePreviewSink();
       controller?.dispose();
       controller = undefined;
     },
@@ -277,6 +368,84 @@ function ensurePanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
   );
 
   return panel;
+}
+
+function openWorkspacePanel(context: vscode.ExtensionContext, rawUrl: string): void {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    void vscode.window.showErrorMessage('PL Preview: Could not open workspace: invalid URL.');
+    return;
+  }
+
+  if (!isLoopbackWorkspaceUrl(url)) {
+    void vscode.window.showErrorMessage('PL Preview: Could not open workspace: unexpected URL.');
+    return;
+  }
+
+  const port = Number(url.port);
+  if (!Number.isInteger(port) || port <= 0) {
+    void vscode.window.showErrorMessage('PL Preview: Could not open workspace: missing preview port.');
+    return;
+  }
+
+  const key = url.toString();
+  const existing = workspacePanels.get(key);
+  if (existing) {
+    existing.reveal(vscode.ViewColumn.Beside, false);
+    return;
+  }
+
+  const workspacePanel = vscode.window.createWebviewPanel(
+    WORKSPACE_VIEW_TYPE,
+    workspacePanelTitle(url),
+    { preserveFocus: false, viewColumn: vscode.ViewColumn.Beside },
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      portMapping: [{ webviewPort: port, extensionHostPort: port }],
+    },
+  );
+
+  workspacePanels.set(key, workspacePanel);
+  workspacePanel.webview.html = workspacePanelHtml({ src: key });
+  workspacePanel.onDidDispose(
+    () => {
+      workspacePanels.delete(key);
+    },
+    null,
+    context.subscriptions,
+  );
+}
+
+function workspacePanelTitle(url: URL): string {
+  const id = url.pathname.match(/\/workspace\/([^/?#]+)\/?$/)?.[1];
+  return id ? `Workspace ${safeDecodeURIComponent(id)} (Preview)` : WORKSPACE_PANEL_TITLE;
+}
+
+function isLoopbackWorkspaceUrl(url: URL): boolean {
+  return (
+    url.protocol === 'http:' &&
+    (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]') &&
+    /(^|\/)workspace\/[^/?#]+\/?$/.test(url.pathname)
+  );
+}
+
+function randomMessageToken(): string {
+  return randomBytes(16).toString('hex');
+}
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function formatError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** The runtime bound this session by {@link ensureRuntimeReady}; must be resolved first. */
@@ -412,6 +581,7 @@ function describeEndpoint(endpoint: RuntimeEndpoint): string {
 
 /** Drop the current runtime (stopping its containers) so the next open re-resolves. */
 async function resetRuntime(): Promise<void> {
+  disposePreviewSink();
   controller?.dispose();
   controller = undefined;
   const previous = runtime;
@@ -439,11 +609,12 @@ async function openPreview(context: vscode.ExtensionContext): Promise<void> {
   const view = ensurePanel(context);
 
   if (!controller) {
+    previewSink = new WebviewPreviewSink(view, getOutput());
     controller = new PreviewController({
       source: new VscodeEditorWorkspaceSource(),
       runtime: getRuntime(),
       clock: new SystemClock(),
-      sink: new WebviewPreviewSink(view, getOutput()),
+      sink: previewSink,
       log: (line) => getOutput().appendLine(line),
     });
   }
@@ -730,6 +901,7 @@ function watchPreviewability(context: vscode.ExtensionContext): void {
 }
 
 export async function deactivate(): Promise<void> {
+  disposePreviewSink();
   controller?.dispose();
   controller = undefined;
   panel?.dispose();
@@ -738,4 +910,9 @@ export async function deactivate(): Promise<void> {
   runtime = undefined;
   output?.dispose();
   output = undefined;
+}
+
+function disposePreviewSink(): void {
+  previewSink?.dispose();
+  previewSink = undefined;
 }

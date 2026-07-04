@@ -10,12 +10,15 @@ import {
   PREVIEW_VIEW_TYPE,
   REFRESH_PREVIEW_COMMAND,
   SHOW_LOGS_COMMAND,
+  WORKSPACE_PANEL_TITLE,
+  WORKSPACE_VIEW_TYPE,
   emptyPanelHtml,
   errorPanelHtml,
   notPreviewablePanelHtml,
   previewPanelHtml,
   previewPanelTitle,
   startingPanelHtml,
+  workspacePanelHtml,
 } from '../src/panel';
 
 const packageRoot = path.dirname(__dirname);
@@ -79,6 +82,7 @@ describe('PL Preview panel', () => {
   it('keeps the command id and view type in the plPreview namespace', () => {
     assert.match(OPEN_PREVIEW_COMMAND, /^plPreview\./);
     assert.match(PREVIEW_VIEW_TYPE, /^plPreview\./);
+    assert.match(WORKSPACE_VIEW_TYPE, /^plPreview\./);
   });
 });
 
@@ -178,6 +182,7 @@ describe('previewPanelHtml', () => {
     // Scripts + same-origin for the question render, plus forms/popups/modals for
     // the workspace page's reboot/reset controls and interactive workspace UIs.
     assert.match(html, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups/i);
+    assert.match(html, /allow-popups-to-escape-sandbox/i);
     assert.match(html, /referrerpolicy="no-referrer"/i);
   });
 
@@ -255,6 +260,21 @@ describe('previewPanelHtml', () => {
     assert.match(html, /postMessage\(\{ type: 'newVariant' \}\)/);
   });
 
+  it('accepts workspace-open messages from the proxied question iframe', () => {
+    const html = previewPanelHtml({
+      src: 'http://127.0.0.1:49999/questions/arithmetic?variant=1',
+      variant: '1',
+      workspaceBridgeToken: 'workspace-token',
+      workspaceTargetOrigin: 'http://127.0.0.1:49812',
+    });
+
+    assert.match(html, /message\.type === 'plPreview\.openWorkspace'/);
+    assert.match(html, /event\.origin !== workspaceFrameOrigin/);
+    assert.match(html, /message\.token !== workspaceBridgeToken/);
+    assert.match(html, /postMessage\(\{ type: 'openWorkspace', url: message\.url \}\)/);
+    assert.match(html, /url\.origin === workspaceTargetOrigin/);
+  });
+
   it('escapes the iframe src so it cannot break out of the attribute', () => {
     const html = previewPanelHtml({
       src: 'http://127.0.0.1:1/questions/a"><script>x?variant=1',
@@ -268,6 +288,34 @@ describe('previewPanelHtml', () => {
     const html = previewPanelHtml({ src, variant: '"><script>evil()</script>' });
 
     assert.doesNotMatch(html, /<script>evil/);
+  });
+});
+
+describe('workspacePanelHtml', () => {
+  const src = 'http://127.0.0.1:49812/workspace/1';
+
+  it('frames the workspace page in a complete standalone HTML document', () => {
+    const html = workspacePanelHtml({ src });
+
+    assert.match(html, /^<!DOCTYPE html>/i);
+    assert.match(html, /<iframe/i);
+    assert.match(html, new RegExp(`src="${src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
+    assert.match(html, new RegExp(`<title>${WORKSPACE_PANEL_TITLE}</title>`));
+  });
+
+  it('permits framing only the workspace loopback origin', () => {
+    const html = workspacePanelHtml({ src });
+
+    assert.match(html, /frame-src http:\/\/127\.0\.0\.1:49812/i);
+    assert.doesNotMatch(html, /frame-src[^;]*\*/i);
+  });
+
+  it('allows the workspace page controls and nested interactive UI to run', () => {
+    const html = workspacePanelHtml({ src });
+
+    assert.match(html, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups/i);
+    assert.match(html, /allow-popups-to-escape-sandbox/i);
+    assert.match(html, /referrerpolicy="no-referrer"/i);
   });
 });
 

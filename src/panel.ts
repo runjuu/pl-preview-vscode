@@ -27,8 +27,14 @@ export const STOP_SERVERS_COMMAND = 'plPreview.stopServers';
 /** Stable view type used when creating the webview panel. */
 export const PREVIEW_VIEW_TYPE = 'plPreview.panel';
 
+/** Stable view type used when creating a workspace webview tab. */
+export const WORKSPACE_VIEW_TYPE = 'plPreview.workspace';
+
 /** Default tab title, shown before a question resolves and in the empty state. */
 export const PREVIEW_PANEL_TITLE = 'PL Preview';
+
+/** Default tab title for workspace pages opened from a preview. */
+export const WORKSPACE_PANEL_TITLE = 'PL Workspace';
 
 /**
  * The panel tab title for a previewed question: its `info.json` title (the caller
@@ -317,6 +323,12 @@ export interface PreviewPanelInput {
   src: string;
   /** Current Stable Preview Variant seed, shown in the toolbar. */
   variant: string;
+  /** Unguessable token required on host-to-webview update messages. */
+  hostMessageToken?: string;
+  /** Unguessable token accepted from the proxied question iframe's workspace bridge. */
+  workspaceBridgeToken?: string;
+  /** Real preview-server origin that workspace URLs must target. */
+  workspaceTargetOrigin?: string;
 }
 
 /**
@@ -329,16 +341,23 @@ export interface PreviewPanelInput {
  * The CSP relaxes `default-src 'none'` only far enough to frame that one origin
  * (`frame-src <origin>`), so the preview server's absolute-from-root asset URLs
  * (`/preview-render/*`, `/assets/*`) resolve while nothing else may be framed,
- * plus a single nonce'd `script-src` for the button's one inline script — which
- * only posts a `newVariant` message back to the extension host (the reroll runs
- * there, same as the Command Palette command). `frame-src <origin>` also covers
- * the workspace page (same origin) that the iframe navigates to for a workspace
- * question, and its nested container iframe. The iframe sandbox adds `allow-forms`
- * (the workspace page's reboot/reset POST forms) and `allow-popups`/`allow-modals`/
- * `allow-downloads` for interactive workspace UIs (terminals, VNC, notebooks), on
- * top of `allow-scripts allow-same-origin`; `referrerpolicy="no-referrer"` stays.
+ * plus a single nonce'd `script-src` for the toolbar and workspace-link bridge
+ * messages. The question iframe points at a same-process loopback proxy, so
+ * workspace links rendered by `pl-workspace` can be rewritten to post an
+ * `openWorkspace` request to the extension host. The iframe sandbox adds
+ * `allow-forms` (question submission POSTs), `allow-popups` plus
+ * `allow-popups-to-escape-sandbox` as a browser-native fallback for target-blank
+ * links, and `allow-modals`/`allow-downloads` for interactive workspace UIs
+ * (terminals, VNC, notebooks), on top of `allow-scripts allow-same-origin`;
+ * `referrerpolicy="no-referrer"` stays.
  */
-export function previewPanelHtml({ src, variant }: PreviewPanelInput): string {
+export function previewPanelHtml({
+  src,
+  variant,
+  hostMessageToken = scriptNonce(),
+  workspaceBridgeToken = scriptNonce(),
+  workspaceTargetOrigin = new URL(src).origin,
+}: PreviewPanelInput): string {
   const origin = new URL(src).origin;
   const nonce = scriptNonce();
   return `<!DOCTYPE html>
@@ -435,13 +454,17 @@ export function previewPanelHtml({ src, variant }: PreviewPanelInput): string {
     <div class="content">
       <iframe
         src="${escapeHtml(src)}"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
         referrerpolicy="no-referrer"
         title="${escapeHtml(PREVIEW_PANEL_TITLE)}"
       ></iframe>
     </div>
     <script nonce="${nonce}">
       const vscode = acquireVsCodeApi();
+      const hostMessageToken = ${JSON.stringify(hostMessageToken)};
+      const workspaceBridgeToken = ${JSON.stringify(workspaceBridgeToken)};
+      const workspaceFrameOrigin = ${JSON.stringify(origin)};
+      const workspaceTargetOrigin = ${JSON.stringify(workspaceTargetOrigin)};
       const iframe = document.querySelector('iframe');
       const seedValue = document.querySelector('.seed code');
       document.querySelector('.reroll').addEventListener('click', () => {
@@ -452,11 +475,73 @@ export function previewPanelHtml({ src, variant }: PreviewPanelInput): string {
       // would tear down and repaint the toolbar too, which reads as a flash.
       window.addEventListener('message', (event) => {
         const message = event.data;
-        if (!message || message.type !== 'render') return;
+        if (!message) return;
+        if (message.type === 'plPreview.openWorkspace') {
+          if (event.origin !== workspaceFrameOrigin) return;
+          if (message.token !== workspaceBridgeToken) return;
+          if (!isWorkspaceUrl(message.url)) return;
+          vscode.postMessage({ type: 'openWorkspace', url: message.url });
+          return;
+        }
+        if (message.token !== hostMessageToken) return;
+        if (message.type !== 'render') return;
         if (typeof message.variant === 'string') seedValue.textContent = message.variant;
         iframe.src = message.src;
       });
+      function isWorkspaceUrl(value) {
+        if (typeof value !== 'string') return false;
+        try {
+          const url = new URL(value);
+          return url.origin === workspaceTargetOrigin && /(^|\\/)workspace\\/[^/?#]+\\/?$/.test(url.pathname);
+        } catch {
+          return false;
+        }
+      }
     </script>
+  </body>
+</html>`;
+}
+
+export interface WorkspacePanelInput {
+  /** Loopback URL for the preview-server workspace page. */
+  src: string;
+}
+
+/** HTML for a workspace page opened from a rendered question in its own webview tab. */
+export function workspacePanelHtml({ src }: WorkspacePanelInput): string {
+  const origin = new URL(src).origin;
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; frame-src ${origin}; style-src 'unsafe-inline';"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>${escapeHtml(WORKSPACE_PANEL_TITLE)}</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      iframe {
+        border: 0;
+        display: block;
+        height: 100%;
+        width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <iframe
+      src="${escapeHtml(src)}"
+      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
+      referrerpolicy="no-referrer"
+      title="${escapeHtml(WORKSPACE_PANEL_TITLE)}"
+    ></iframe>
   </body>
 </html>`;
 }

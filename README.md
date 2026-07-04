@@ -25,8 +25,8 @@ and renders the active question in a VS Code webview.
   it.
 - Keep the same variant seed across refreshes so edits are easy to compare.
 - Reroll the current question with **New variant**.
-- Preview **workspace questions** — the live workspace container opens right in the
-  preview panel (in a trusted workspace; see [Workspace questions](#workspace-questions)).
+- Preview **workspace questions** — open the live workspace container in its own
+  VS Code tab (in a trusted workspace; see [Workspace questions](#workspace-questions)).
 - Show render and container logs from the **PL Preview** Output channel.
 - Keep preview servers warm for recently used courses, with a command to stop
   them when you are done.
@@ -106,8 +106,8 @@ Workspace questions run an interactive per-variant container (a terminal, VS Cod
 in the browser, JupyterLab, and so on). To preview one, the preview server must be
 able to launch that container itself, so PL Preview mounts the container runtime
 socket into the preview container and connects both to a shared per-course network.
-Everything is proxied through the preview server, so the live workspace opens right
-in the preview panel — click **Open workspace** on a workspace question.
+Everything is proxied through the preview server, so the live workspace opens in a
+separate VS Code tab — click **Open workspace** on a workspace question.
 
 Because this lets previewed course code talk to your container runtime (which is
 root-equivalent with a rootful daemon), it is enabled only when **both** hold:
