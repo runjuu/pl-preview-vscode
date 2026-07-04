@@ -55,14 +55,24 @@ export function classifyDockerProbe(probe: DockerProbe): DockerAvailability {
 /** Where to send an author who needs to install Docker. */
 export const DOCKER_INSTALL_URL = 'https://docs.docker.com/get-docker/';
 
+/**
+ * The action button a remediation offers, when there is one:
+ * - `openUrl` sends the author to an external page (the install docs).
+ * - `launchDockerDesktop` starts the already-installed Docker Desktop app; the
+ *   shell then waits for the daemon and continues into the preview. Whether this
+ *   button is actually surfaced depends on the platform — see
+ *   {@link dockerDesktopLaunch}.
+ */
+export type DockerRemediationAction =
+  | { readonly kind: 'openUrl'; readonly label: string; readonly url: string }
+  | { readonly kind: 'launchDockerDesktop'; readonly label: string };
+
 /** An actionable notification for a non-available Docker state. */
 export interface DockerRemediation {
   /** One-sentence, actionable summary shown in the notification. */
   readonly message: string;
-  /** Primary action-button label, when there is a concrete external fix. */
-  readonly action?: string;
-  /** URL the action opens (install docs), when the fix lives outside the editor. */
-  readonly url?: string;
+  /** Primary action button, when there is a concrete fix to offer. */
+  readonly action?: DockerRemediationAction;
 }
 
 /**
@@ -80,18 +90,54 @@ export function dockerRemediation(
       return {
         message:
           'Docker is required to render previews, but it was not found. Install Docker Desktop, then run the preview again.',
-        action: 'Install Docker',
-        url: DOCKER_INSTALL_URL,
+        action: { kind: 'openUrl', label: 'Install Docker', url: DOCKER_INSTALL_URL },
       };
     case 'notRunning':
       return {
         message:
           'Docker is installed but not running. Start Docker Desktop, then run the preview again.',
+        action: { kind: 'launchDockerDesktop', label: 'Start Docker Desktop' },
       };
     case 'unknown':
       return {
         message: `Could not reach the Docker daemon: ${availability.detail}. Make sure Docker is installed and running, then run the preview again.`,
       };
+  }
+}
+
+/** How to start the Docker Desktop application on a given platform. */
+export interface DockerDesktopLaunch {
+  /** Executable or launcher to spawn (e.g. `open`, or the `Docker Desktop.exe` path). */
+  readonly command: string;
+  /** Arguments passed to {@link command}. */
+  readonly args: readonly string[];
+}
+
+/**
+ * The command that starts the Docker Desktop application on `platform`, or
+ * `undefined` where we can't reliably launch it: on Linux the engine is usually a
+ * privileged system service rather than a GUI app, so there (and on any other
+ * platform) the author is told to start Docker manually. Pure so the per-platform
+ * choice is unit-tested; the shell spawns the result — and, on Windows, only
+ * surfaces the button once it confirms the executable is actually present.
+ *
+ * @param programFiles the Windows `%ProgramFiles%` directory; defaults to the
+ *   standard `C:\Program Files` when unset.
+ */
+export function dockerDesktopLaunch(
+  platform: NodeJS.Platform,
+  programFiles?: string,
+): DockerDesktopLaunch | undefined {
+  switch (platform) {
+    case 'darwin':
+      // `open -a Docker` launches Docker Desktop and returns immediately.
+      return { command: 'open', args: ['-a', 'Docker'] };
+    case 'win32': {
+      const base = programFiles && programFiles.length > 0 ? programFiles : 'C:\\Program Files';
+      return { command: `${base}\\Docker\\Docker\\Docker Desktop.exe`, args: [] };
+    }
+    default:
+      return undefined;
   }
 }
 

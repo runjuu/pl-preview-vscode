@@ -1,6 +1,13 @@
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+
 import * as vscode from 'vscode';
 
-import { dockerRemediation } from './dockerDetection';
+import {
+  type DockerDesktopLaunch,
+  dockerDesktopLaunch,
+  dockerRemediation,
+} from './dockerDetection';
 import { DockerPreviewRuntime } from './dockerRuntime';
 import {
   NEW_VARIANT_COMMAND,
@@ -35,7 +42,9 @@ import { describeStartupProgress } from './startupProgress';
  * driving the extension. The Stable Preview Variant toolbar + New variant
  * command and the render-diagnostics states — `notPreviewable` / `error` plus
  * the `Show logs` Output-channel action — are wired here, as is the guided
- * first-run Docker detection + pinned-image pull-with-progress. The always-on
+ * first-run Docker detection (including a "Start Docker Desktop" action that
+ * launches a stopped daemon and waits for it) + pinned-image pull-with-progress.
+ * The always-on
  * {@link PreviewabilityWatcher} that lights the editor-title preview icon on
  * question files is wired here too.
  */
@@ -294,10 +303,19 @@ async function openPreview(context: vscode.ExtensionContext): Promise<void> {
   await controller.start();
 }
 
+/** How long to wait for a just-launched Docker Desktop to accept connections. */
+const DOCKER_START_TIMEOUT_MS = 90_000;
+/** How often to re-probe the daemon while waiting for Docker Desktop to start. */
+const DOCKER_START_POLL_INTERVAL_MS = 2_000;
+/** Briefly watch the launch command for an immediate missing-app / non-zero failure. */
+const DOCKER_LAUNCH_FAILURE_GRACE_MS = 1_500;
+
 /**
  * Detect a reachable Docker daemon. Returns `true` to proceed; on a missing /
- * stopped / unreachable daemon it shows the actionable remediation (opening the
- * install docs if the author chooses) and returns `false` so the caller stops.
+ * stopped / unreachable daemon it shows the actionable remediation and returns
+ * `false` so the caller stops — except when the author clicks "Start Docker
+ * Desktop", where we launch Docker, wait for its daemon to come up, and return
+ * `true` to continue straight into the preview.
  */
 async function ensureDockerReady(): Promise<boolean> {
   const availability = await getRuntime().checkAvailability();
@@ -306,15 +324,140 @@ async function ensureDockerReady(): Promise<boolean> {
     return true;
   }
 
-  const actions = remediation.action ? [remediation.action] : [];
+  const action = remediation.action;
+  // The launch button only appears on a platform where we know how to start
+  // Docker Desktop (and, on Windows, where its executable is present); elsewhere
+  // the notification falls back to its manual "start Docker" guidance.
+  const launcher = action?.kind === 'launchDockerDesktop' ? resolveDockerLauncher() : undefined;
+  const showButton = action?.kind === 'openUrl' || (action?.kind === 'launchDockerDesktop' && launcher);
+  const buttons = showButton && action ? [action.label] : [];
+
   const choice = await vscode.window.showErrorMessage(
     `PL Preview: ${remediation.message}`,
-    ...actions,
+    ...buttons,
   );
-  if (choice && choice === remediation.action && remediation.url) {
-    void vscode.env.openExternal(vscode.Uri.parse(remediation.url));
+  if (!action || choice !== action.label) {
+    return false;
   }
-  return false;
+
+  switch (action.kind) {
+    case 'openUrl':
+      void vscode.env.openExternal(vscode.Uri.parse(action.url));
+      return false;
+    case 'launchDockerDesktop':
+      // `launcher` is defined here: the button only rendered once it resolved.
+      return launcher ? launchDockerAndWait(launcher) : false;
+  }
+}
+
+/**
+ * The Docker Desktop launch command for this machine, or `undefined` when we
+ * can't reliably start it. On Windows we additionally require the executable to
+ * exist, so a resolved launcher always spawns something real (rather than making
+ * the author wait out the timeout on a missing app).
+ */
+function resolveDockerLauncher(): DockerDesktopLaunch | undefined {
+  const launcher = dockerDesktopLaunch(process.platform, process.env.ProgramFiles);
+  if (!launcher) return undefined;
+  if (process.platform === 'win32' && !fs.existsSync(launcher.command)) return undefined;
+  return launcher;
+}
+
+/**
+ * Spawn Docker Desktop, then poll the daemon behind a cancellable progress
+ * notification until it answers. Returns `true` once Docker is reachable so the
+ * caller continues into the preview, or `false` if the author cancels or Docker
+ * doesn't come up in time (with a nudge to retry).
+ */
+async function launchDockerAndWait(launcher: DockerDesktopLaunch): Promise<boolean> {
+  const launched = await startDockerDesktop(launcher);
+  if (!launched.ok) {
+    const detail = `[pl-preview] could not start Docker Desktop: ${launched.detail}`;
+    getOutput().appendLine(detail);
+    void vscode.window
+      .showErrorMessage(
+        'PL Preview: Could not start Docker Desktop. Start it manually, then run the preview again.',
+        'Show logs',
+      )
+      .then((choice) => {
+        if (choice === 'Show logs') getOutput().show(true);
+      });
+    return false;
+  }
+
+  return waitForDockerAfterLaunch();
+}
+
+type DockerLaunchResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly detail: string };
+
+function startDockerDesktop(launcher: DockerDesktopLaunch): Promise<DockerLaunchResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let graceTimer: NodeJS.Timeout | undefined;
+    const settle = (result: DockerLaunchResult) => {
+      if (settled) return;
+      settled = true;
+      if (graceTimer) clearTimeout(graceTimer);
+      resolve(result);
+    };
+
+    try {
+      // Detached + unref'd so the launched app never tethers the editor's lifetime.
+      const child = spawn(launcher.command, [...launcher.args], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.once('error', (error) => {
+        settle({ ok: false, detail: error.message });
+      });
+      child.once('exit', (code, signal) => {
+        if (code === 0) {
+          settle({ ok: true });
+          return;
+        }
+        const detail = code === null ? `signal ${signal ?? 'unknown'}` : `exit code ${code}`;
+        settle({ ok: false, detail: `${launcher.command} exited with ${detail}` });
+      });
+      child.once('spawn', () => {
+        graceTimer = setTimeout(
+          () => settle({ ok: true }),
+          DOCKER_LAUNCH_FAILURE_GRACE_MS,
+        );
+      });
+      child.unref();
+    } catch (error) {
+      settle({ ok: false, detail: error instanceof Error ? error.message : String(error) });
+    }
+  });
+}
+
+async function waitForDockerAfterLaunch(): Promise<boolean> {
+  return vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: 'PL Preview: Waiting for Docker to start…',
+      cancellable: true,
+    },
+    async (_progress, token) => {
+      const deadline = Date.now() + DOCKER_START_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        if (token.isCancellationRequested) return false;
+        const availability = await getRuntime().checkAvailability();
+        if (availability.kind === 'available') return true;
+        await delay(DOCKER_START_POLL_INTERVAL_MS);
+      }
+      void vscode.window.showWarningMessage(
+        'PL Preview: Docker is taking longer than expected to start. Run the preview again once Docker Desktop is ready.',
+      );
+      return false;
+    },
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export function activate(context: vscode.ExtensionContext): void {

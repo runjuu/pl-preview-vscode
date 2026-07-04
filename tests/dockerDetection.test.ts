@@ -5,6 +5,7 @@ import {
   DOCKER_INSTALL_URL,
   PullProgressAggregator,
   classifyDockerProbe,
+  dockerDesktopLaunch,
   dockerRemediation,
   formatPullStatus,
 } from '../src/dockerDetection';
@@ -62,22 +63,55 @@ describe('dockerRemediation', () => {
     const remediation = dockerRemediation({ kind: 'notInstalled' });
     assert.ok(remediation);
     assert.match(remediation.message, /install/i);
-    assert.equal(remediation.action, 'Install Docker');
-    assert.equal(remediation.url, DOCKER_INSTALL_URL);
+    assert.deepEqual(remediation.action, {
+      kind: 'openUrl',
+      label: 'Install Docker',
+      url: DOCKER_INSTALL_URL,
+    });
   });
 
-  it('tells the author to start Docker (no external link) when installed but stopped', () => {
+  it('offers a Start Docker Desktop launch action when installed but stopped', () => {
     const remediation = dockerRemediation({ kind: 'notRunning' });
     assert.ok(remediation);
     assert.match(remediation.message, /start/i);
-    assert.equal(remediation.url, undefined);
+    assert.deepEqual(remediation.action, {
+      kind: 'launchDockerDesktop',
+      label: 'Start Docker Desktop',
+    });
   });
 
-  it('surfaces the raw detail for an unknown failure', () => {
+  it('surfaces the raw detail (with no action) for an unknown failure', () => {
     const remediation = dockerRemediation({ kind: 'unknown', detail: 'permission denied' });
     assert.ok(remediation);
     assert.match(remediation.message, /permission denied/);
-    assert.equal(remediation.url, undefined);
+    assert.equal(remediation.action, undefined);
+  });
+});
+
+describe('dockerDesktopLaunch', () => {
+  it('opens the Docker app via `open -a` on macOS', () => {
+    assert.deepEqual(dockerDesktopLaunch('darwin'), { command: 'open', args: ['-a', 'Docker'] });
+  });
+
+  it('points at the Docker Desktop executable under %ProgramFiles% on Windows', () => {
+    assert.deepEqual(dockerDesktopLaunch('win32', 'D:\\Programs'), {
+      command: 'D:\\Programs\\Docker\\Docker\\Docker Desktop.exe',
+      args: [],
+    });
+  });
+
+  it('falls back to the standard Program Files path when %ProgramFiles% is unset', () => {
+    assert.deepEqual(dockerDesktopLaunch('win32'), {
+      command: 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe',
+      args: [],
+    });
+    // An empty string is treated as unset rather than producing a bare "\\Docker" path.
+    assert.equal(dockerDesktopLaunch('win32', '')?.command.startsWith('C:\\Program Files'), true);
+  });
+
+  it('has no known launch command on Linux (engine-only) or other platforms', () => {
+    assert.equal(dockerDesktopLaunch('linux'), undefined);
+    assert.equal(dockerDesktopLaunch('aix'), undefined);
   });
 });
 
