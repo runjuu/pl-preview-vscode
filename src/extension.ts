@@ -390,17 +390,22 @@ function openWorkspacePanel(context: vscode.ExtensionContext, rawUrl: string): v
     return;
   }
 
+  // Open the workspace as a sibling tab in the preview's own column rather than
+  // `ViewColumn.Beside`: the preview tab is active when "Open workspace" is
+  // clicked, so `Beside` would spawn a third column instead of reusing its space.
+  const previewColumn = panel?.viewColumn ?? vscode.ViewColumn.Beside;
+
   const key = url.toString();
   const existing = workspacePanels.get(key);
   if (existing) {
-    existing.reveal(vscode.ViewColumn.Beside, false);
+    existing.reveal(previewColumn, false);
     return;
   }
 
   const workspacePanel = vscode.window.createWebviewPanel(
     WORKSPACE_VIEW_TYPE,
     workspacePanelTitle(url),
-    { preserveFocus: false, viewColumn: vscode.ViewColumn.Beside },
+    { preserveFocus: false, viewColumn: previewColumn },
     {
       enableScripts: true,
       retainContextWhenHidden: true,
