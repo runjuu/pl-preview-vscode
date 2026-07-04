@@ -331,8 +331,12 @@ export interface PreviewPanelInput {
  * (`/preview-render/*`, `/assets/*`) resolve while nothing else may be framed,
  * plus a single nonce'd `script-src` for the button's one inline script — which
  * only posts a `newVariant` message back to the extension host (the reroll runs
- * there, same as the Command Palette command). The iframe keeps the POC posture —
- * `sandbox="allow-scripts allow-same-origin"` and `referrerpolicy="no-referrer"`.
+ * there, same as the Command Palette command). `frame-src <origin>` also covers
+ * the workspace page (same origin) that the iframe navigates to for a workspace
+ * question, and its nested container iframe. The iframe sandbox adds `allow-forms`
+ * (the workspace page's reboot/reset POST forms) and `allow-popups`/`allow-modals`/
+ * `allow-downloads` for interactive workspace UIs (terminals, VNC, notebooks), on
+ * top of `allow-scripts allow-same-origin`; `referrerpolicy="no-referrer"` stays.
  */
 export function previewPanelHtml({ src, variant }: PreviewPanelInput): string {
   const origin = new URL(src).origin;
@@ -431,7 +435,7 @@ export function previewPanelHtml({ src, variant }: PreviewPanelInput): string {
     <div class="content">
       <iframe
         src="${escapeHtml(src)}"
-        sandbox="allow-scripts allow-same-origin"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"
         referrerpolicy="no-referrer"
         title="${escapeHtml(PREVIEW_PANEL_TITLE)}"
       ></iframe>

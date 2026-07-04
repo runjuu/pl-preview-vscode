@@ -1,11 +1,15 @@
+import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 
 import Docker from 'dockerode';
 
 import {
+  PREVIEW_WORKSPACE_CONTAINER_LABEL,
+  PREVIEW_WORKSPACE_HOME_ROOT_LABEL,
   buildPreviewContainerCreateOptions,
   type PreviewContainerInspect,
+  type PreviewWorkspaceContainerConfig,
   resolvePreviewImage,
   resolvePublishedPort,
 } from './containerSpec';
@@ -71,11 +75,35 @@ export interface DockerPreviewRuntimeOptions {
   cliNames?: readonly string[];
   /** Sink for container stdout/stderr and lifecycle notes (Output channel in prod). */
   log?: (line: string) => void;
+  /**
+   * When set, preview containers are granted workspace-question support: the
+   * runtime socket is mounted, a per-course shared network is created, and a
+   * per-course writable home dir under {@link PreviewWorkspaceSupport.homeRoot}
+   * is bind-mounted. Absent when the workspace is untrusted or the resolved
+   * endpoint is not socket-based.
+   */
+  workspaces?: PreviewWorkspaceSupport;
+}
+
+/** Host-side inputs for granting a preview container workspace support. */
+export interface PreviewWorkspaceSupport {
+  /** Host path of the runtime socket, bind-mounted so the server can launch containers. */
+  dockerSocketPath: string;
+  /** Base host dir under which per-course writable workspace home roots are created. */
+  homeRoot: string;
+  /** Supplementary gid for socket access (Linux); omit on Docker Desktop/macOS. */
+  socketGid?: number;
 }
 
 const READINESS_ATTEMPTS = 120;
 const READINESS_INTERVAL_MS = 500;
 const PROBE_TIMEOUT_MS = 1_000;
+
+/**
+ * SIGTERM grace given to a preview container on stop so its own shutdown handler
+ * can reap the workspace containers it launched before Docker force-kills it.
+ */
+const STOP_TIMEOUT_SECONDS = 10;
 
 interface RunningContainer {
   container: Docker.Container;
@@ -87,6 +115,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
   private readonly image: string;
   private readonly cliNames: readonly string[];
   private readonly log: (line: string) => void;
+  private readonly workspaces: PreviewWorkspaceSupport | undefined;
   private readonly running = new Map<string, RunningContainer>();
 
   constructor(options: DockerPreviewRuntimeOptions = {}) {
@@ -94,6 +123,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
     this.image = options.image ?? resolvePreviewImage();
     this.cliNames = options.cliNames ?? ['docker'];
     this.log = options.log ?? (() => {});
+    this.workspaces = options.workspaces;
   }
 
   /**
@@ -144,13 +174,16 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       return;
     }
     this.running.delete(courseRoot);
-    await this.forceRemove(running.container);
+    await this.gracefulRemove(running.container);
+    await this.cleanupWorkspaceSupport(courseRoot);
   }
 
   async stopAll(): Promise<void> {
+    const courseRoots = [...this.running.keys()];
     const containers = [...this.running.values()];
     this.running.clear();
-    await Promise.all(containers.map(({ container }) => this.forceRemove(container)));
+    await Promise.all(containers.map(({ container }) => this.gracefulRemove(container)));
+    await Promise.all(courseRoots.map((courseRoot) => this.cleanupWorkspaceSupport(courseRoot)));
   }
 
   /**
@@ -166,6 +199,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       image: this.image,
       courseRoot,
       courseId: previewCourseId(courseRoot),
+      workspaces: await this.prepareWorkspaceSupport(courseRoot),
     });
 
     try {
@@ -252,6 +286,99 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       /* container may already be gone (AutoRemove); ignore */
     }
   }
+
+  /**
+   * Stop the container with a SIGTERM grace period before removing it, so the
+   * preview server's shutdown handler can reap the workspace containers it
+   * launched. `stop` auto-removes an AutoRemove container, so the follow-up
+   * force-remove just mops up if the stop raced or timed out.
+   */
+  private async gracefulRemove(container: Docker.Container): Promise<void> {
+    try {
+      await container.stop({ t: STOP_TIMEOUT_SECONDS });
+    } catch {
+      /* already stopped, gone, or never started */
+    }
+    await this.forceRemove(container);
+  }
+
+  /**
+   * Prepare per-course workspace support: ensure the shared network and a
+   * writable home root exist, then return the container-spec config. Returns
+   * undefined when workspace support is disabled for this session.
+   */
+  private async prepareWorkspaceSupport(
+    courseRoot: string,
+  ): Promise<PreviewWorkspaceContainerConfig | undefined> {
+    const support = this.workspaces;
+    if (support == null) {
+      return undefined;
+    }
+
+    const network = previewNetworkName(previewCourseId(courseRoot));
+    const homeDir = workspaceHomeDir(support.homeRoot, courseRoot);
+    await this.ensureNetwork(network);
+    await fs.mkdir(homeDir, { recursive: true });
+    // The container runs as uid 1001, which rarely matches the host user, so
+    // make the bind-mounted home root writable regardless of ownership.
+    await fs.chmod(homeDir, 0o777);
+
+    return {
+      dockerSocketPath: support.dockerSocketPath,
+      network,
+      homeDir,
+      socketGid: support.socketGid,
+    };
+  }
+
+  private async ensureNetwork(name: string): Promise<void> {
+    try {
+      await this.docker.createNetwork({ Name: name, CheckDuplicate: true });
+    } catch (error) {
+      if (!isConflict(error)) {
+        throw error;
+      }
+      /* the network already exists — reuse it */
+    }
+  }
+
+  /**
+   * Reap any workspace containers this course's preview server left behind and
+   * remove its now-unused network. The preview server reaps its own children on
+   * a graceful stop; this is the backstop for a hard kill.
+   */
+  private async cleanupWorkspaceSupport(courseRoot: string): Promise<void> {
+    const support = this.workspaces;
+    if (support == null) {
+      return;
+    }
+    await this.reapWorkspaceContainers(workspaceHomeDir(support.homeRoot, courseRoot));
+    await this.removeNetwork(previewNetworkName(previewCourseId(courseRoot)));
+  }
+
+  private async reapWorkspaceContainers(homeDir: string): Promise<void> {
+    try {
+      const containers = await this.docker.listContainers({
+        all: true,
+        filters: { label: [`${PREVIEW_WORKSPACE_CONTAINER_LABEL}=true`] },
+      });
+      await Promise.all(
+        containers
+          .filter((info) => info.Labels?.[PREVIEW_WORKSPACE_HOME_ROOT_LABEL] === homeDir)
+          .map((info) => this.forceRemove(this.docker.getContainer(info.Id))),
+      );
+    } catch {
+      /* best-effort: the server also prunes its own orphans on next startup */
+    }
+  }
+
+  private async removeNetwork(name: string): Promise<void> {
+    try {
+      await this.docker.getNetwork(name).remove();
+    } catch {
+      /* still in use by another container, or already gone */
+    }
+  }
 }
 
 /** Reuse a stable course id from the folder name, plus a short path hash for uniqueness. */
@@ -262,6 +389,20 @@ export function previewCourseId(courseRoot: string): string {
     hash = (hash * 31 + char.charCodeAt(0)) | 0;
   }
   return `${base}-${(hash >>> 0).toString(36)}`;
+}
+
+/** Name of the per-course user-defined network the preview and workspace containers share. */
+export function previewNetworkName(courseId: string): string {
+  return `pl-preview-net-${courseId}`;
+}
+
+/** Per-course host directory holding workspace home dirs; bind-mounted at the identical path. */
+function workspaceHomeDir(homeRoot: string, courseRoot: string): string {
+  return path.join(homeRoot, previewCourseId(courseRoot));
+}
+
+function isConflict(error: unknown): boolean {
+  return (error as { statusCode?: number } | undefined)?.statusCode === 409;
 }
 
 function probe(origin: string): Promise<boolean> {

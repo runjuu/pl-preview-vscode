@@ -6,7 +6,7 @@ import path from 'node:path';
 import Docker from 'dockerode';
 import * as vscode from 'vscode';
 
-import { DockerPreviewRuntime } from './dockerRuntime';
+import { DockerPreviewRuntime, type PreviewWorkspaceSupport } from './dockerRuntime';
 import {
   NEW_VARIANT_COMMAND,
   OPEN_PREVIEW_COMMAND,
@@ -328,6 +328,7 @@ function buildRuntime(candidate: RuntimeCandidate): void {
   }
   selectedProfile = candidate.profile;
   selectedEndpoint = candidate.endpoint;
+  const workspaces = computeWorkspaceSupport(candidate.endpoint);
   // First-use pull and readiness progress surface in the panel's live "Starting
   // preview…" overview (via the controller's onProgress), so the runtime only
   // needs the Output-channel log sink here.
@@ -335,10 +336,53 @@ function buildRuntime(candidate: RuntimeCandidate): void {
     docker: new Docker(dockerodeOptionsForEndpoint(candidate.endpoint)),
     cliNames: candidate.profile.cliNames,
     log: (line) => getOutput().appendLine(line),
+    workspaces,
   });
   getOutput().appendLine(
     `[pl-preview] using ${candidate.profile.displayName} via ${describeEndpoint(candidate.endpoint)}`,
   );
+  getOutput().appendLine(
+    workspaces == null
+      ? '[pl-preview] workspace questions disabled (needs a trusted workspace on a socket runtime)'
+      : '[pl-preview] workspace questions enabled for this trusted workspace',
+  );
+}
+
+/**
+ * Decide whether preview containers get workspace-question support this session.
+ * Enabling it mounts the runtime socket into the preview container (host-root
+ * equivalent with a rootful daemon), so it is gated on an explicitly trusted
+ * workspace and a socket endpoint we can actually bind-mount (podman-machine /
+ * remote tcp/ssh endpoints have no local socket).
+ */
+function computeWorkspaceSupport(endpoint: RuntimeEndpoint): PreviewWorkspaceSupport | undefined {
+  if (!vscode.workspace.isTrusted || endpoint.kind !== 'socket') {
+    return undefined;
+  }
+  if (!vscode.workspace.getConfiguration('plPreview').get<boolean>('enableWorkspaces', true)) {
+    return undefined;
+  }
+  return {
+    dockerSocketPath: endpoint.socketPath,
+    homeRoot: path.join(os.tmpdir(), 'pl-preview-vscode-workspaces'),
+    socketGid: socketGroupId(endpoint.socketPath),
+  };
+}
+
+/**
+ * The supplementary gid the non-root container user needs to open the mounted
+ * socket. Only Linux's rootful socket (root:docker) requires it; Docker
+ * Desktop's per-user socket is already reachable.
+ */
+function socketGroupId(socketPath: string): number | undefined {
+  if (process.platform !== 'linux') {
+    return undefined;
+  }
+  try {
+    return fs.statSync(socketPath).gid;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Whether two endpoints address the same daemon. */
@@ -644,10 +688,16 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (
         event.affectsConfiguration('plPreview.containerRuntime') ||
-        event.affectsConfiguration('plPreview.containerHost')
+        event.affectsConfiguration('plPreview.containerHost') ||
+        event.affectsConfiguration('plPreview.enableWorkspaces')
       ) {
         void resetRuntime();
       }
+    }),
+    // Granting trust unlocks workspace-question support, so drop the current
+    // runtime and rebuild it (with the socket mounted) on the next preview.
+    vscode.workspace.onDidGrantWorkspaceTrust(() => {
+      void resetRuntime();
     }),
   );
 

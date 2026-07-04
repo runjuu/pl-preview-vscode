@@ -34,6 +34,18 @@ export const PREVIEW_SERVER_ENTRYPOINT =
 export const PREVIEW_COURSE_MOUNT = '/course';
 
 /**
+ * Path the host container-runtime socket is bind-mounted at inside the
+ * container when workspace support is enabled. The in-container preview server
+ * launches workspace containers through the ambient Docker client, which
+ * defaults to this path, so mounting here needs no extra configuration.
+ */
+export const PREVIEW_DOCKER_SOCKET_MOUNT = '/var/run/docker.sock';
+
+/** Labels the preview server applies to the workspace containers it launches. */
+export const PREVIEW_WORKSPACE_CONTAINER_LABEL = 'com.prairielearn.preview-workspace';
+export const PREVIEW_WORKSPACE_HOME_ROOT_LABEL = 'com.prairielearn.preview-workspace.home-root';
+
+/**
  * Small writable tmpfs at `/tmp`; the rest of the rootfs is read-only. `noexec`
  * stops untrusted question code from staging and running a binary it writes and
  * `nosuid` neutralizes setuid bits — both safe for native rendering.
@@ -55,6 +67,27 @@ export const DEFAULT_PREVIEW_PIDS_LIMIT = 256;
 
 const PORT_KEY = `${PREVIEW_CONTAINER_PORT}/tcp`;
 
+/**
+ * Enables workspace-question support by granting the preview container access
+ * to the host container runtime. Present only for a trusted workspace on a
+ * socket-based runtime; absent otherwise (the container stays jailed and the
+ * server runs with workspaces disabled).
+ */
+export interface PreviewWorkspaceContainerConfig {
+  /** Host path of the runtime socket, bind-mounted so the server can launch containers. */
+  dockerSocketPath: string;
+  /** Shared user-defined network the preview and workspace containers join. */
+  network: string;
+  /**
+   * Writable host directory that holds workspace home dirs. Bind-mounted at the
+   * identical path so the sibling workspace containers (created on the host
+   * daemon) can bind the same paths.
+   */
+  homeDir: string;
+  /** Supplementary group gid granting the non-root container user socket access (Linux). */
+  socketGid?: number;
+}
+
 export interface PreviewContainerSpecInput {
   /** Pinned preview-server image reference. */
   image: string;
@@ -62,6 +95,12 @@ export interface PreviewContainerSpecInput {
   courseRoot: string;
   /** Stable identifier for the course (used for the label and container name). */
   courseId: string;
+  /**
+   * When set, the preview server can launch workspace-question containers. This
+   * widens the container's privilege (a mounted runtime socket is host-root
+   * equivalent with a rootful daemon), so callers gate it on workspace trust.
+   */
+  workspaces?: PreviewWorkspaceContainerConfig;
 }
 
 /**
@@ -90,10 +129,22 @@ export function resolvePreviewImage(
 export function buildPreviewContainerCreateOptions(
   input: PreviewContainerSpecInput,
 ): Docker.ContainerCreateOptions {
-  const { image, courseRoot, courseId } = input;
+  const { image, courseRoot, courseId, workspaces } = input;
+
+  const binds = [`${courseRoot}:${PREVIEW_COURSE_MOUNT}:ro`];
+  const cmd = [
+    '--course-dir',
+    PREVIEW_COURSE_MOUNT,
+    '--host',
+    '0.0.0.0',
+    '--port',
+    String(PREVIEW_CONTAINER_PORT),
+    '--workers-execution-mode',
+    'native',
+  ];
 
   const hostConfig: Docker.HostConfig = {
-    Binds: [`${courseRoot}:${PREVIEW_COURSE_MOUNT}:ro`],
+    Binds: binds,
     // Dynamic loopback publish: Docker picks a free host port, reachable only
     // from 127.0.0.1.
     PortBindings: { [PORT_KEY]: [{ HostIp: '127.0.0.1', HostPort: '' }] },
@@ -111,22 +162,37 @@ export function buildPreviewContainerCreateOptions(
     AutoRemove: true,
   };
 
+  if (workspaces == null) {
+    // No runtime access: disable the workspace manager so workspace questions
+    // render a clear "disabled" page instead of failing to launch a container.
+    cmd.push('--no-workspaces');
+  } else {
+    // Mount the host runtime socket so the server can launch workspace
+    // containers as siblings, join them on a shared network so it can reach
+    // them by alias, and expose a writable, identically-pathed home root it can
+    // populate for them (sibling containers bind the same host paths).
+    binds.push(`${workspaces.dockerSocketPath}:${PREVIEW_DOCKER_SOCKET_MOUNT}`);
+    binds.push(`${workspaces.homeDir}:${workspaces.homeDir}`);
+    hostConfig.NetworkMode = workspaces.network;
+    if (workspaces.socketGid != null) {
+      // The non-root container user needs the socket's group to open it.
+      hostConfig.GroupAdd = [String(workspaces.socketGid)];
+    }
+    cmd.push(
+      '--workspace-home-dir',
+      workspaces.homeDir,
+      '--workspace-network',
+      workspaces.network,
+    );
+  }
+
   return {
     Image: image,
     User: PREVIEW_CONTAINER_USER,
     // Keep native Python from writing .pyc files onto the read-only rootfs.
     Env: ['PYTHONDONTWRITEBYTECODE=1'],
     Entrypoint: ['node', PREVIEW_SERVER_ENTRYPOINT],
-    Cmd: [
-      '--course-dir',
-      PREVIEW_COURSE_MOUNT,
-      '--host',
-      '0.0.0.0',
-      '--port',
-      String(PREVIEW_CONTAINER_PORT),
-      '--workers-execution-mode',
-      'native',
-    ],
+    Cmd: cmd,
     Labels: {
       [PREVIEW_LABEL]: 'true',
       [PREVIEW_COURSE_LABEL]: courseId,

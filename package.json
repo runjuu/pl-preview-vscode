@@ -83,8 +83,19 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Container runtime endpoint, e.g. `unix:///run/user/1000/podman/podman.sock`, `tcp://127.0.0.1:2375`, or `npipe:////./pipe/podman-machine-default`. Required when `#plPreview.containerRuntime#` is `custom`; when set with `auto`, it overrides detection. Leave blank to auto-detect."
+        },
+        "plPreview.enableWorkspaces": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Preview workspace questions. This mounts the container runtime socket into the preview container so it can launch workspace containers, which grants previewed course code container-runtime access (root-equivalent with a rootful daemon). It applies only in a trusted workspace on a socket-based runtime; other question types preview regardless."
         }
       }
+    }
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Workspace question previews run course-provided code in Docker/Podman containers, so they require a trusted workspace. Other question types preview normally."
     }
   },
   "scripts": {

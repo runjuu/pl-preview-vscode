@@ -5,6 +5,7 @@ import {
   DEFAULT_PREVIEW_IMAGE,
   PREVIEW_CONTAINER_PORT,
   PREVIEW_COURSE_LABEL,
+  PREVIEW_DOCKER_SOCKET_MOUNT,
   PREVIEW_LABEL,
   PREVIEW_SERVER_ENTRYPOINT,
   buildPreviewContainerCreateOptions,
@@ -39,6 +40,9 @@ describe('buildPreviewContainerCreateOptions', () => {
       adjacent(cmd, '--port', String(PREVIEW_CONTAINER_PORT)),
       'must listen on the exposed container port',
     );
+    // With no runtime access granted, the server must not try to launch
+    // workspace containers it cannot create.
+    assert.ok(cmd.includes('--no-workspaces'), 'a jailed container disables workspaces');
   });
 
   it('bind-mounts the course read-only at the container course path', () => {
@@ -91,6 +95,73 @@ describe('buildPreviewContainerCreateOptions', () => {
 
   it('runs the caller-supplied image verbatim', () => {
     assert.equal(createOptions().Image, DEFAULT_PREVIEW_IMAGE);
+  });
+});
+
+describe('buildPreviewContainerCreateOptions with workspace support', () => {
+  const workspaces = {
+    dockerSocketPath: '/Users/author/.docker/run/docker.sock',
+    network: 'pl-preview-net-my-course',
+    homeDir: '/tmp/pl-preview-workspaces/my-course',
+    socketGid: 20,
+  };
+
+  function workspaceOptions() {
+    return buildPreviewContainerCreateOptions({
+      image: DEFAULT_PREVIEW_IMAGE,
+      courseRoot,
+      courseId: 'my-course',
+      workspaces,
+    });
+  }
+
+  it('mounts the runtime socket and an identically-pathed writable home dir', () => {
+    const binds = workspaceOptions().HostConfig?.Binds ?? [];
+
+    assert.ok(binds.includes(`${courseRoot}:/course:ro`), 'course stays read-only');
+    assert.ok(
+      binds.includes(`${workspaces.dockerSocketPath}:${PREVIEW_DOCKER_SOCKET_MOUNT}`),
+      'the host runtime socket must be mounted where the ambient client expects it',
+    );
+    assert.ok(
+      binds.includes(`${workspaces.homeDir}:${workspaces.homeDir}`),
+      'the home dir must be bind-mounted at the identical host path',
+    );
+  });
+
+  it('joins the shared network and grants the socket group', () => {
+    const host = workspaceOptions().HostConfig ?? {};
+
+    assert.equal(host.NetworkMode, workspaces.network);
+    assert.deepEqual(host.GroupAdd, ['20']);
+  });
+
+  it('passes the workspace home dir and network to the server, keeping workspaces on', () => {
+    const cmd = workspaceOptions().Cmd ?? [];
+
+    assert.ok(adjacent(cmd, '--workspace-home-dir', workspaces.homeDir));
+    assert.ok(adjacent(cmd, '--workspace-network', workspaces.network));
+    assert.ok(!cmd.includes('--no-workspaces'), 'workspaces stay enabled');
+  });
+
+  it('keeps the container hardened even with runtime access', () => {
+    const host = workspaceOptions().HostConfig ?? {};
+
+    assert.deepEqual(host.CapDrop, ['ALL']);
+    assert.equal(host.ReadonlyRootfs, true);
+    assert.equal(host.AutoRemove, true);
+    assert.notEqual(workspaceOptions().User, 'root');
+  });
+
+  it('omits the socket group when no gid is supplied', () => {
+    const host = buildPreviewContainerCreateOptions({
+      image: DEFAULT_PREVIEW_IMAGE,
+      courseRoot,
+      courseId: 'my-course',
+      workspaces: { ...workspaces, socketGid: undefined },
+    }).HostConfig ?? {};
+
+    assert.equal(host.GroupAdd, undefined);
   });
 });
 

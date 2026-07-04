@@ -25,6 +25,8 @@ and renders the active question in a VS Code webview.
   it.
 - Keep the same variant seed across refreshes so edits are easy to compare.
 - Reroll the current question with **New variant**.
+- Preview **workspace questions** — the live workspace container opens right in the
+  preview panel (in a trusted workspace; see [Workspace questions](#workspace-questions)).
 - Show render and container logs from the **PL Preview** Output channel.
 - Keep preview servers warm for recently used courses, with a command to stop
   them when you are done.
@@ -86,6 +88,7 @@ To choose a runtime explicitly, set these in VS Code settings:
 | --- | --- |
 | `plPreview.containerRuntime` | `auto` (default), `docker`, `podman`, or `custom`. |
 | `plPreview.containerHost` | An explicit endpoint, e.g. `unix:///run/user/1000/podman/podman.sock`, `tcp://127.0.0.1:2375`, or `npipe:////./pipe/podman-machine-default`. Required for `custom`; with `auto` it overrides detection. |
+| `plPreview.enableWorkspaces` | `true` (default). Preview workspace questions; see [Workspace questions](#workspace-questions). Set to `false` to keep the preview container fully jailed. |
 
 When multiple runtimes are running and `auto` is selected, Docker is preferred;
 set `plPreview.containerRuntime` to `podman` to force Podman.
@@ -96,6 +99,30 @@ default Docker socket points at Podman and `auto` just works), export
 `CONTAINER_HOST` before launching VS Code, or set `plPreview.containerHost` to the
 machine's socket (from `podman machine inspect`). On Linux, the rootless socket
 (`$XDG_RUNTIME_DIR/podman/podman.sock`) is detected automatically.
+
+## Workspace questions
+
+Workspace questions run an interactive per-variant container (a terminal, VS Code
+in the browser, JupyterLab, and so on). To preview one, the preview server must be
+able to launch that container itself, so PL Preview mounts the container runtime
+socket into the preview container and connects both to a shared per-course network.
+Everything is proxied through the preview server, so the live workspace opens right
+in the preview panel — click **Open workspace** on a workspace question.
+
+Because this lets previewed course code talk to your container runtime (which is
+root-equivalent with a rootful daemon), it is enabled only when **both** hold:
+
+- **The workspace is trusted.** PL Preview declares limited support for untrusted
+  workspaces, so other question types still preview in an untrusted folder, but
+  workspace previews stay off until you trust the workspace. You can also turn the
+  feature off entirely with `plPreview.enableWorkspaces: false`.
+- **The runtime is socket-based** — Docker Desktop, or Docker/Podman on Linux. A
+  Podman machine on macOS/Windows (reached over a TCP/SSH endpoint) has no local
+  socket to mount, so workspace previews are unavailable there; plain questions
+  still preview.
+
+Prefer **rootless Podman** where you can: if the mounted socket is a rootless
+daemon's, a compromise costs your user account rather than host root.
 
 ## Limitations
 

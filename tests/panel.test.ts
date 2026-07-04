@@ -169,13 +169,15 @@ describe('startingPanelHtml', () => {
 describe('previewPanelHtml', () => {
   const src = 'http://127.0.0.1:49812/questions/arithmetic?variant=1';
 
-  it('frames the rendered question with the POC iframe posture', () => {
+  it('frames the rendered question with the workspace-capable iframe posture', () => {
     const html = previewPanelHtml({ src, variant: '1' });
 
     assert.match(html, /^<!DOCTYPE html>/i);
     assert.match(html, /<iframe/i);
     assert.match(html, new RegExp(`src="${src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
-    assert.match(html, /sandbox="allow-scripts allow-same-origin"/i);
+    // Scripts + same-origin for the question render, plus forms/popups/modals for
+    // the workspace page's reboot/reset controls and interactive workspace UIs.
+    assert.match(html, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups/i);
     assert.match(html, /referrerpolicy="no-referrer"/i);
   });
 
