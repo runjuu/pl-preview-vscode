@@ -133,6 +133,7 @@
     "watch": "pnpm run bundle -- --watch",
     "typecheck": "tsc -p ./tsconfig.json",
     "test": "tsx --test tests/*.test.ts",
+    "update-image": "node scripts/update-preview-image.mjs",
     "test:coverage": "c8 node --import tsx --test tests/*.test.ts",
     "vscode:prepublish": "pnpm run build"
   },
