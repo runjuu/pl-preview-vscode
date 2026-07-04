@@ -1,0 +1,66 @@
+name: Publish Extension
+
+# Publish PL Preview to the VS Code Marketplace when a version tag is pushed.
+# Tag the release commit as v<version> (matching package.json), e.g. v1.1.0.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify tag matches package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "Tag version:  $TAG_VERSION"
+          echo "package.json: $PKG_VERSION"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION. Bump package.json (and CHANGELOG.md) before tagging."
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
+
+      # Bundles via `vscode:prepublish` (esbuild). --no-dependencies is correct
+      # because everything ships inside out/extension.js; node_modules is ignored.
+      - name: Package extension
+        run: pnpm dlx @vscode/vsce package --no-dependencies -o "pl-preview-vscode-${GITHUB_REF_NAME#v}.vsix"
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pl-preview-vscode-${{ github.ref_name }}
+          path: "*.vsix"
+
+      - name: Publish to VS Code Marketplace
+        run: pnpm dlx @vscode/vsce publish --no-dependencies --packagePath "pl-preview-vscode-${GITHUB_REF_NAME#v}.vsix"
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
