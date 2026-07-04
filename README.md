@@ -3,10 +3,10 @@
   <h1>PL Preview for VS Code</h1>
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=runjuu.pl-preview-vscode">
-      <img alt="VS Code Marketplace" src="https://img.shields.io/visual-studio-marketplace/v/runjuu.pl-preview-vscode?label=VS%20Code%20Marketplace">
+      <img alt="VS Code Marketplace" src="https://vsmarketplacebadges.dev/version-short/runjuu.pl-preview-vscode.svg?label=VS%20Code%20Marketplace">
     </a>
     <a href="https://marketplace.visualstudio.com/items?itemName=runjuu.pl-preview-vscode">
-      <img alt="Installs" src="https://img.shields.io/visual-studio-marketplace/i/runjuu.pl-preview-vscode">
+      <img alt="Installs" src="https://vsmarketplacebadges.dev/installs-short/runjuu.pl-preview-vscode.svg?label=Installs">
     </a>
     <a href="./LICENSE">
       <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg">
