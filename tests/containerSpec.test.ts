@@ -163,6 +163,17 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
 
     assert.equal(host.GroupAdd, undefined);
   });
+
+  it('grants group 0 for a Docker Desktop root:root socket (gid 0 is not "no gid")', () => {
+    const host = buildPreviewContainerCreateOptions({
+      image: DEFAULT_PREVIEW_IMAGE,
+      courseRoot,
+      courseId: 'my-course',
+      workspaces: { ...workspaces, socketGid: 0 },
+    }).HostConfig ?? {};
+
+    assert.deepEqual(host.GroupAdd, ['0']);
+  });
 });
 
 describe('resolvePreviewImage', () => {

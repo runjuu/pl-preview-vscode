@@ -4,6 +4,11 @@ All notable changes to PL Preview will be documented in this file.
 
 ## Unreleased
 
+- Fix workspace questions failing with "Docker is not reachable: connect EACCES
+  /var/run/docker.sock" on macOS/Windows. Docker Desktop re-presents the mounted
+  runtime socket as `root:root` inside the container, so the hardened non-root
+  preview container could not open it; it is now granted supplementary group 0
+  on those platforms.
 - Support Podman and other Docker-Engine-API-compatible runtimes (Colima, Rancher
   Desktop, OrbStack) in addition to Docker. The runtime is auto-detected — Docker's
   socket first, then Podman's — and can be pinned with the new

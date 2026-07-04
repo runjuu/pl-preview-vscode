@@ -91,7 +91,11 @@ export interface PreviewWorkspaceSupport {
   dockerSocketPath: string;
   /** Base host dir under which per-course writable workspace home roots are created. */
   homeRoot: string;
-  /** Supplementary gid for socket access (Linux); omit on Docker Desktop/macOS. */
+  /**
+   * Supplementary gid the non-root container user joins to open the mounted
+   * socket: the socket's real group on native Linux, or group 0 on VM-backed
+   * runtimes (Docker Desktop et al.) that re-present it as root:root.
+   */
   socketGid?: number;
 }
 

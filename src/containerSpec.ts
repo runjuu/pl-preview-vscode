@@ -84,7 +84,11 @@ export interface PreviewWorkspaceContainerConfig {
    * daemon) can bind the same paths.
    */
   homeDir: string;
-  /** Supplementary group gid granting the non-root container user socket access (Linux). */
+  /**
+   * Supplementary group gid granting the non-root container user socket access:
+   * the socket's real group on native Linux, or group 0 on VM-backed runtimes
+   * (Docker Desktop et al.) that re-present the mounted socket as root:root.
+   */
   socketGid?: number;
 }
 

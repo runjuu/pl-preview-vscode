@@ -540,12 +540,16 @@ function computeWorkspaceSupport(endpoint: RuntimeEndpoint): PreviewWorkspaceSup
 
 /**
  * The supplementary gid the non-root container user needs to open the mounted
- * socket. Only Linux's rootful socket (root:docker) requires it; Docker
- * Desktop's per-user socket is already reachable.
+ * socket. VM-backed runtimes (Docker Desktop, and the Lima/WSL2-based engines on
+ * macOS/Windows) re-present the bind-mounted socket as `root:root` mode 0660
+ * inside the guest — regardless of who owns it on the host — so the container
+ * user must join group 0 to open it; the host-side gid means nothing there. On
+ * native Linux the bind mount preserves the socket's real ownership instead
+ * (a rootful daemon's socket is `root:docker`), so we grant that gid.
  */
 function socketGroupId(socketPath: string): number | undefined {
   if (process.platform !== 'linux') {
-    return undefined;
+    return 0;
   }
   try {
     return fs.statSync(socketPath).gid;
