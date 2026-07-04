@@ -16,15 +16,15 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
@@ -55,7 +55,7 @@ jobs:
         run: pnpm dlx @vscode/vsce package --no-dependencies -o "pl-preview-vscode-${GITHUB_REF_NAME#v}.vsix"
 
       - name: Upload VSIX artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: pl-preview-vscode-${{ github.ref_name }}
           path: "*.vsix"
