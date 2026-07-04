@@ -61,6 +61,15 @@ jobs:
           path: "*.vsix"
 
       - name: Publish to VS Code Marketplace
-        run: pnpm dlx @vscode/vsce publish --no-dependencies --packagePath "pl-preview-vscode-${GITHUB_REF_NAME#v}.vsix"
+        run: pnpm dlx @vscode/vsce publish --no-dependencies --skip-duplicate --packagePath "pl-preview-vscode-${GITHUB_REF_NAME#v}.vsix"
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      # Publishes the same VSIX to Open VSX (open-vsx.org) so VSCodium / Cursor /
+      # Gitpod users can install it too. Requires a one-time setup: sign the Open
+      # VSX Publisher Agreement, create the `runjuu` namespace, and add OVSX_PAT
+      # as a repo secret. See README / repo docs.
+      - name: Publish to Open VSX
+        run: pnpm dlx ovsx publish --skip-duplicate --packagePath "pl-preview-vscode-${GITHUB_REF_NAME#v}.vsix"
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
