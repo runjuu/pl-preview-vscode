@@ -142,23 +142,25 @@ export function emptyPanelHtml(): string {
  *
  * The three phases (download image → start container → wait for server) render as
  * a stepper: the active row is highlighted, earlier rows read done, later rows
- * pending. The bar is determinate (a percentage width) during the image download
- * and an indeterminate slide otherwise. CSP keeps `default-src 'none'` and only
- * relaxes it for the one nonce'd script.
+ * pending, and the active row shows a spinning loading indicator in place of its
+ * marker. CSP keeps `default-src 'none'` and only relaxes it for the one nonce'd script.
  */
 export function startingPanelHtml(progress?: PreviewStartupProgress): string {
   const view = describeStartupProgress(progress);
   const nonce = scriptNonce();
   const stepsHtml = view.steps
-    .map(
-      (step, index) =>
+    .map((step, index) => {
+      // The raw Docker status line lives under the download step (index 0), the only
+      // phase it describes; it stays in the DOM (updated in place) but hides when empty.
+      const detail =
+        index === 0 ? `<span class="detail" id="detail">${escapeHtml(view.detail ?? '')}</span>` : '';
+      return (
         `<li id="step-${index}" data-status="${step.status}">` +
         `<span class="label">${escapeHtml(step.label)}</span>` +
-        `<span class="note">${escapeHtml(step.note ?? '')}</span></li>`,
-    )
+        `<span class="note">${escapeHtml(step.note ?? '')}</span>${detail}</li>`
+      );
+    })
     .join('');
-  const mode = view.percent != null ? 'determinate' : 'indeterminate';
-  const pct = view.percent ?? 0;
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
@@ -179,8 +181,9 @@ export function startingPanelHtml(progress?: PreviewStartupProgress): string {
       }
       .steps li {
         display: flex;
+        flex-wrap: wrap;
         align-items: baseline;
-        gap: 0.6rem;
+        gap: 0.3rem 0.6rem;
         padding: 0.2rem 0;
         opacity: 0.55;
       }
@@ -190,19 +193,32 @@ export function startingPanelHtml(progress?: PreviewStartupProgress): string {
       .steps li[data-status="active"] {
         opacity: 1;
       }
+      /* Every marker is a ring the size of the active spinner. Pending rings sit
+         static and faint; the active ring adds an accent arc and spins; done
+         collapses to a check. */
       .steps li::before {
-        content: "○";
-        width: 1rem;
+        content: "";
+        width: 0.85rem;
+        height: 0.85rem;
+        margin: 0 0.075rem;
         flex: none;
-        text-align: center;
+        box-sizing: border-box;
+        align-self: center;
+        border-radius: 50%;
+        border: 2px solid var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.25));
+      }
+      .steps li[data-status="active"]::before {
+        border-top-color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+        animation: pl-spin 0.7s linear infinite;
       }
       .steps li[data-status="done"]::before {
         content: "✓";
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        font-size: 0.85rem;
         color: var(--vscode-charts-green, var(--vscode-foreground));
-      }
-      .steps li[data-status="active"]::before {
-        content: "●";
-        color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
       }
       .steps .note {
         margin-left: auto;
@@ -210,35 +226,33 @@ export function startingPanelHtml(progress?: PreviewStartupProgress): string {
         opacity: 0.7;
         font-variant-numeric: tabular-nums;
       }
-      .progress {
-        height: 4px;
-        width: 100%;
-        max-width: 20rem;
-        margin: 1.25rem auto 0;
-        border-radius: 2px;
+      @keyframes pl-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .steps li[data-status="active"]::before {
+          animation: none;
+          border-color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+        }
+      }
+      /* The latest raw Docker status line, tucked under the "Downloading image" row and
+         indented to line up with the step's label (past the icon). Hidden when empty. */
+      .steps .detail {
+        flex-basis: 100%;
+        box-sizing: border-box;
+        padding-left: 1.6rem;
+        font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+        font-size: 0.72rem;
+        color: var(--vscode-descriptionForeground, var(--vscode-foreground));
+        opacity: 0.7;
+        white-space: nowrap;
         overflow: hidden;
-        background: var(--vscode-editorWidget-border, rgba(128, 128, 128, 0.2));
+        text-overflow: ellipsis;
       }
-      .progress .bar {
-        height: 100%;
-        border-radius: 2px;
-        background: var(--vscode-progressBar-background, var(--vscode-focusBorder));
-      }
-      .progress[data-mode="determinate"] .bar {
-        width: var(--pct, 0%);
-        transition: width 0.2s ease;
-      }
-      .progress[data-mode="indeterminate"] .bar {
-        width: 40%;
-        animation: pl-slide 1.2s ease-in-out infinite;
-      }
-      @keyframes pl-slide {
-        0% {
-          transform: translateX(-110%);
-        }
-        100% {
-          transform: translateX(275%);
-        }
+      .steps .detail:empty {
+        display: none;
       }
       .footnote {
         margin-top: 1rem;
@@ -251,25 +265,23 @@ export function startingPanelHtml(progress?: PreviewStartupProgress): string {
     <main>
       <h1 id="heading">${escapeHtml(view.heading)}</h1>
       <ol class="steps">${stepsHtml}</ol>
-      <div class="progress" id="progress" data-mode="${mode}" style="--pct: ${pct}%">
-        <div class="bar"></div>
-      </div>
-      <p class="footnote">First use downloads the preview image; later starts skip this.</p>
+      <p class="footnote">Only the first launch downloads the preview image. Once ready, edit and preview your question in real time, without leaving your editor.</p>
     </main>
     <script nonce="${nonce}">
       const heading = document.getElementById('heading');
-      const progress = document.getElementById('progress');
+      const detail = document.getElementById('detail');
       const rows = [
         document.getElementById('step-0'),
         document.getElementById('step-1'),
         document.getElementById('step-2'),
       ];
-      // Update the stepper and bar in place from a posted describeStartupProgress
-      // view, so an in-flight download never rebuilds the document.
+      // Update the stepper in place from a posted describeStartupProgress view, so
+      // an in-flight download never rebuilds the document.
       window.addEventListener('message', (event) => {
         const message = event.data;
         if (!message || message.type !== 'progress') return;
         if (typeof message.heading === 'string') heading.textContent = message.heading;
+        if (detail) detail.textContent = typeof message.detail === 'string' ? message.detail : '';
         const steps = Array.isArray(message.steps) ? message.steps : [];
         rows.forEach((row, i) => {
           const step = steps[i];
@@ -280,12 +292,6 @@ export function startingPanelHtml(progress?: PreviewStartupProgress): string {
           if (label && typeof step.label === 'string') label.textContent = step.label;
           if (note) note.textContent = typeof step.note === 'string' ? step.note : '';
         });
-        if (typeof message.percent === 'number') {
-          progress.dataset.mode = 'determinate';
-          progress.style.setProperty('--pct', message.percent + '%');
-        } else {
-          progress.dataset.mode = 'indeterminate';
-        }
       });
     </script>
   </body>
@@ -314,7 +320,7 @@ export function notPreviewablePanelHtml(type: string): string {
 export function errorPanelHtml(message: string): string {
   return messageStateHtml(
     'Preview failed',
-    `${message} — run “PL Preview: Show logs” from the Command Palette to view the full logs.`,
+    `${message}. Run “PL Preview: Show logs” from the Command Palette to view the full logs.`,
   );
 }
 

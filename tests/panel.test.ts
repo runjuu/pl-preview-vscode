@@ -130,21 +130,32 @@ describe('startingPanelHtml', () => {
   });
 
   it('renders the three-phase stepper with the image download active during a pull', () => {
-    const html = startingPanelHtml({ phase: 'pullingImage', percent: 42, layersDone: 2, layersTotal: 5 });
+    const html = startingPanelHtml({
+      phase: 'pullingImage',
+      percent: 42,
+      layersDone: 2,
+      layersTotal: 5,
+      detail: 'Pull complete 6332824b21e0',
+    });
 
     assert.match(html, /Downloading image/);
     assert.match(html, /Starting container/);
-    assert.match(html, /Waiting for server/);
-    // The download step is active with a determinate bar filled to 42%.
+    assert.match(html, /Launching preview server/);
+    // The download step is active with its layer-count note and a spinning marker.
     assert.match(html, /id="step-0" data-status="active"/);
-    assert.match(html, /data-mode="determinate"/);
-    assert.match(html, /--pct:\s*42%/);
-    assert.match(html, />42%</);
+    assert.match(html, /2\/5 layers/);
+    assert.match(html, /@keyframes pl-spin/);
+    // The latest raw Docker status line is surfaced under the stepper.
+    assert.match(html, /id="detail"[^>]*>Pull complete 6332824b21e0</);
   });
 
-  it('uses an indeterminate bar with no percent before the download and while starting the container', () => {
-    assert.match(startingPanelHtml(), /data-mode="indeterminate"/);
-    assert.match(startingPanelHtml({ phase: 'startingContainer' }), /data-mode="indeterminate"/);
+  it('has no progress bar and shows a loading spinner on the active step instead', () => {
+    const starting = startingPanelHtml({ phase: 'startingContainer' });
+
+    assert.doesNotMatch(starting, /class="progress"/);
+    assert.doesNotMatch(starting, /data-mode=/);
+    assert.match(starting, /id="step-1" data-status="active"/);
+    assert.match(starting, /@keyframes pl-spin/);
   });
 
   it('marks earlier phases done once the readiness wait is active', () => {

@@ -156,14 +156,14 @@ describe('formatPullStatus', () => {
   it('renders a percentage for a layer with a known total, so the download reads as progressing', () => {
     assert.equal(
       formatPullStatus({ status: 'Downloading', id: 'a1b2c3d4', progressDetail: { current: 45, total: 90 } }),
-      'Downloading a1b2c3d4 — 50%',
+      'Downloading a1b2c3d4 (50%)',
     );
   });
 
   it('clamps the percentage into 0–100 for out-of-range progress details', () => {
     assert.equal(
       formatPullStatus({ status: 'Downloading', progressDetail: { current: 120, total: 100 } }),
-      'Downloading — 100%',
+      'Downloading (100%)',
     );
   });
 
@@ -186,80 +186,80 @@ describe('formatPullStatus', () => {
 });
 
 describe('PullProgressAggregator', () => {
-  it('reports no percent while layers are only announced (not yet downloading or done)', () => {
+  it('averages the download fraction across all announced layers', () => {
     const aggregate = new PullProgressAggregator();
-    assert.equal(aggregate.add({ status: 'Pulling fs layer', id: 'a' }).percent, undefined);
-    const snapshot = aggregate.add({ status: 'Waiting', id: 'b' });
-    assert.equal(snapshot.percent, undefined);
+    aggregate.add({ status: 'Pulling fs layer', id: 'a' });
+    aggregate.add({ status: 'Pulling fs layer', id: 'b' });
+    // a is 60% downloaded, b has not started → (0.6 + 0) / 2 = 30%.
+    const snapshot = aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 60, total: 100 } });
+    assert.equal(snapshot.percent, 30);
     assert.equal(snapshot.layersTotal, 2);
     assert.equal(snapshot.layersDone, 0);
   });
 
-  it('averages layer completion, so one layer’s size can’t dominate the number', () => {
-    const aggregate = new PullProgressAggregator();
-    aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 25, total: 100 } });
-    // Only layer a is known so far, and it is half done → 50%.
-    assert.equal(
-      aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 50, total: 100 } }).percent,
-      50,
-    );
-    // Layer b joins — three times a's size, but only just started. Because layers
-    // are weighted equally (not by bytes), overall = (0.5 + 0) / 2 = 25%; a byte
-    // denominator would instead read 50 / (100 + 300) ≈ 13% and keep sliding.
-    const snapshot = aggregate.add({ status: 'Downloading', id: 'b', progressDetail: { current: 0, total: 300 } });
-    assert.equal(snapshot.percent, 25);
-    assert.equal(snapshot.layersTotal, 2);
-  });
-
-  it('never goes backwards when a finished layer is followed by a newly-sized larger one', () => {
-    // The reported regression: the bar climbs to ~100% then snaps back to ~20%.
-    // Docker announces every layer up front, then transfers a few at a time, and a
-    // small layer can finish before a big one reveals its (much larger) size.
+  it('weights layers equally, so a big layer revealing its size can’t lurch the percent backwards', () => {
     const aggregate = new PullProgressAggregator();
     aggregate.add({ status: 'Pulling fs layer', id: 'a' });
     aggregate.add({ status: 'Pulling fs layer', id: 'b' });
-    // Small layer a downloads and completes: 1 of 2 layers done → 50%.
     aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 10, total: 10 } });
-    assert.equal(aggregate.add({ status: 'Pull complete', id: 'a' }).percent, 50);
-    // Big layer b reveals a far larger size and barely starts. Byte-weighting would
-    // crater the percent (10 / (10 + 40) = 20%); layer-weighting only ticks it up:
-    // (1 + 0.1) / 2 = 55%.
-    const started = aggregate.add({ status: 'Downloading', id: 'b', progressDetail: { current: 4, total: 40 } });
-    assert.equal(started.percent, 55);
+    // a finished downloading: (1 + 0) / 2 = 50%.
+    assert.equal(aggregate.add({ status: 'Download complete', id: 'a' }).percent, 50);
+    // b now reveals a far larger size and barely starts. A byte denominator would
+    // crater to 10 / (10 + 400) ≈ 2%; equal weighting only ticks up: (1 + 0.01) / 2 = 51%.
+    const started = aggregate.add({ status: 'Downloading', id: 'b', progressDetail: { current: 4, total: 400 } });
+    assert.equal(started.percent, 51);
     assert.ok(started.percent != null && started.percent >= 50, 'progress must not go backwards');
   });
 
-  it('keeps the percent on the download basis after a layer moves to extraction', () => {
+  it('counts a layer as done the moment it finishes downloading, before the extraction burst', () => {
     const aggregate = new PullProgressAggregator();
     aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 100, total: 100 } });
-    // Extracting reports the much larger *uncompressed* size; it must not become
-    // the denominator, so the layer stays counted as its 100/100 download.
-    const snapshot = aggregate.add({ status: 'Extracting', id: 'a', progressDetail: { current: 10, total: 100000 } });
+    // "Download complete" lands well before the end-of-pull "Pull complete" extraction
+    // burst, so the layer count climbs as transfers finish instead of staying at zero.
+    const snapshot = aggregate.add({ status: 'Download complete', id: 'a' });
+    assert.equal(snapshot.layersDone, 1);
     assert.equal(snapshot.percent, 100);
   });
 
-  it('counts a cached "Already exists" layer as a fully complete layer', () => {
+  it('keeps a downloaded layer at 100% through extraction (uncompressed bytes are ignored)', () => {
+    const aggregate = new PullProgressAggregator();
+    aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 100, total: 100 } });
+    aggregate.add({ status: 'Download complete', id: 'a' });
+    // Extracting streams the much larger uncompressed size; it must not resize the layer.
+    const snapshot = aggregate.add({ status: 'Extracting', id: 'a', progressDetail: { current: 10, total: 100000 } });
+    assert.equal(snapshot.percent, 100);
+    assert.equal(snapshot.layersDone, 1);
+  });
+
+  it('counts a cached "Already exists" layer as a fully downloaded layer', () => {
     const aggregate = new PullProgressAggregator();
     aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 50, total: 100 } });
     const snapshot = aggregate.add({ status: 'Already exists', id: 'b' });
     assert.equal(snapshot.layersTotal, 2);
     assert.equal(snapshot.layersDone, 1);
-    // a is half done, b is a fully cached layer → (0.5 + 1) / 2 = 75%.
+    // a is half done, b is fully cached → (0.5 + 1) / 2 = 75%.
     assert.equal(snapshot.percent, 75);
   });
 
-  it('marks a layer done on Pull complete and tops its bytes off to 100%', () => {
+  it('ignores the "Pulling from <repo>" header so its tag id is not counted as a layer', () => {
     const aggregate = new PullProgressAggregator();
-    aggregate.add({ status: 'Downloading', id: 'a', progressDetail: { current: 80, total: 100 } });
-    const snapshot = aggregate.add({ status: 'Pull complete', id: 'a' });
-    assert.equal(snapshot.percent, 100);
+    // The header carries the *tag* ("latest") as its id; counting it would strand the
+    // percent below 100% at the end of the pull.
+    const header = aggregate.add({ status: 'Pulling from prairielearn/prairielearn', id: 'latest' });
+    assert.equal(header.layersTotal, 0);
+    aggregate.add({ status: 'Pulling fs layer', id: 'a' });
+    const snapshot = aggregate.add({ status: 'Download complete', id: 'a' });
+    // One real layer, fully downloaded — reaches a clean 100%.
     assert.equal(snapshot.layersDone, 1);
+    assert.equal(snapshot.layersTotal, 1);
+    assert.equal(snapshot.percent, 100);
   });
 
   it('ignores events without a layer id', () => {
     const aggregate = new PullProgressAggregator();
     const snapshot = aggregate.add({ status: 'Downloading', progressDetail: { current: 10, total: 100 } });
     assert.equal(snapshot.layersTotal, 0);
+    assert.equal(snapshot.layersDone, 0);
     assert.equal(snapshot.percent, undefined);
   });
 });

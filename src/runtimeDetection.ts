@@ -169,7 +169,7 @@ export function formatPullStatus(event: DockerPullEvent): string | undefined {
   const { current, total } = event.progressDetail ?? {};
   const label = event.id ? `${status} ${event.id}` : status;
   if (typeof current === 'number' && typeof total === 'number' && total > 0) {
-    return `${label} — ${clampPercent((current / total) * 100)}%`;
+    return `${label} (${clampPercent((current / total) * 100)}%)`;
   }
   return label;
 }
@@ -179,69 +179,77 @@ function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, Math.round(value)));
 }
 
-/** The aggregate download progress across all layers of an in-flight pull. */
+/** A point-in-time view of an in-flight pull, as the real download progress Docker reports. */
 export interface PullProgressSnapshot {
   /**
-   * Overall completion, averaged across every announced layer, or `undefined`
-   * until at least one layer is downloading or done (before that the bar is
-   * indeterminate).
+   * Overall download completion (0–100), averaged across every announced layer, or
+   * `undefined` before the first layer is announced. Smooth and monotonic — each
+   * layer's own byte fraction feeds it, and the denominator is the fixed layer set.
    */
   readonly percent?: number;
-  /** Layers that have finished pulling (including cached "Already exists" layers). */
+  /** Layers whose download has finished (including cached "Already exists" layers). */
   readonly layersDone: number;
-  /** Distinct layers the pull has announced so far. */
+  /** Distinct real layers the pull has announced so far. */
   readonly layersTotal: number;
 }
+
+/**
+ * The per-layer phases a real pull event announces. The leading `Pulling from <repo>`
+ * header is deliberately absent: it carries the *tag* as its `id`, so counting it
+ * would be mistaking the reference for a layer.
+ */
+const LAYER_PHASE =
+  /^(Pulling fs layer|Waiting|Downloading|Verifying Checksum|Download complete|Extracting|Pull complete|Already exists|Retrying)/i;
+/** The phases that mean a layer has finished downloading (extraction/cache included). */
+const LAYER_DOWNLOADED =
+  /^(Verifying Checksum|Download complete|Extracting|Pull complete|Already exists)/i;
 
 /** Per-layer download tally the {@link PullProgressAggregator} folds events into. */
 interface LayerDownload {
   current: number;
   total: number;
-  done: boolean;
+  downloaded: boolean;
 }
 
 /**
- * Folds a stream of dockerode pull events into an overall download percentage, so
- * the "Starting preview…" stepper can show one moving number instead of the
- * per-layer churn `formatPullStatus` emits for the log.
+ * Folds a stream of dockerode pull events into the real image-download progress: one
+ * smooth `percent`, plus how many layers have finished downloading.
  *
- * Progress is the **average completion across layers**, each weighted equally: a
- * layer's completion is its download-byte fraction while transferring, or a full
- * `1` once done/cached. Weighting by layer count — not by bytes — is what keeps the
- * number climbing smoothly. Docker reveals a layer's compressed size only when that
- * layer *starts* downloading, so a byte denominator grows mid-pull and the percent
- * lurches *backwards* the moment a large layer begins after a small one finished
- * (it races toward 100%, then snaps back). The layer *set*, by contrast, is
- * announced up front (`Pulling fs layer` / `Waiting`), so a layer-count denominator
- * is stable and a newly-sized layer can only add to the numerator.
+ * `percent` is the **average download fraction across layers, weighted equally**: a
+ * layer contributes its download-byte fraction while transferring, or a full `1` once
+ * it has finished downloading (or was cached). The denominator is the layer *count*,
+ * which Docker announces up front (`Pulling fs layer` / `Waiting`) and never changes —
+ * so the number is monotonic and cannot lurch backwards. Weighting by bytes instead
+ * would slide backwards every time a large layer reveals its size mid-pull (Docker
+ * only discloses a layer's compressed size when it *starts* downloading, ~3 at a time).
  *
- * Within a layer we still track **download** bytes only: extraction is fast and
- * reports the far larger *uncompressed* size, so a layer only takes on a byte total
- * from a `Downloading` event, and later phases (`Extracting`, `Pull complete`, …)
- * only top it off or mark it complete.
+ * `layersDone` counts layers that have finished *downloading* — not just those fully
+ * extracted — so it climbs steadily as the concurrent transfers land, instead of
+ * sitting at zero until the extraction burst at the very end.
+ *
+ * Only genuine per-layer events count (see {@link LAYER_PHASE}); the `Pulling from
+ * <repo>` header's tag id is ignored so the layer count is honest. Within a layer only
+ * `Downloading` sets the byte total: extraction reports the far larger *uncompressed*
+ * size, so later phases only mark the layer downloaded, never resize it.
  */
 export class PullProgressAggregator {
   private readonly layers = new Map<string, LayerDownload>();
 
-  /** Fold one event in and return the current aggregate. Events without an `id` are ignored. */
+  /** Fold one event in and return the current snapshot. Non-layer events are ignored. */
   add(event: DockerPullEvent): PullProgressSnapshot {
     const id = event.id;
-    if (id) {
+    const status = event.status?.trim() ?? '';
+    if (id && LAYER_PHASE.test(status)) {
       const layer = this.ensureLayer(id);
-      const status = event.status?.trim() ?? '';
-      const { current, total } = event.progressDetail ?? {};
       if (/^Downloading/i.test(status)) {
-        // Compressed size, streamed incrementally; this is the only phase that
-        // may set the denominator.
+        // Compressed size, streamed incrementally — the only phase that sizes a layer.
+        const { current, total } = event.progressDetail ?? {};
         if (typeof total === 'number' && total > 0) {
           layer.total = total;
           if (typeof current === 'number') layer.current = current;
         }
-      } else if (/^(Extracting|Verifying Checksum|Download complete)/i.test(status)) {
-        // Fully downloaded — top the bytes off, but never trust these totals.
-        if (layer.total > 0) layer.current = layer.total;
-      } else if (/^(Pull complete|Already exists)/i.test(status)) {
-        layer.done = true;
+      } else if (LAYER_DOWNLOADED.test(status)) {
+        layer.downloaded = true;
         if (layer.total > 0) layer.current = layer.total;
       }
     }
@@ -251,7 +259,7 @@ export class PullProgressAggregator {
   private ensureLayer(id: string): LayerDownload {
     let layer = this.layers.get(id);
     if (!layer) {
-      layer = { current: 0, total: 0, done: false };
+      layer = { current: 0, total: 0, downloaded: false };
       this.layers.set(id, layer);
     }
     return layer;
@@ -260,24 +268,19 @@ export class PullProgressAggregator {
   private snapshot(): PullProgressSnapshot {
     let completion = 0;
     let layersDone = 0;
-    let measurable = false;
     for (const layer of this.layers.values()) {
-      if (layer.done) {
-        layersDone += 1;
+      if (layer.downloaded) {
         completion += 1;
-        measurable = true;
+        layersDone += 1;
       } else if (layer.total > 0) {
         completion += Math.min(1, layer.current / layer.total);
-        measurable = true;
       }
-      // A layer that has only been announced (no size, not done) contributes 0 but
-      // still counts toward the denominator, so its later sizing can't shrink the
-      // percent — the fix for the "climbs to ~100% then snaps back" regression.
+      // An announced-but-unstarted layer contributes 0 to the numerator while still
+      // counting toward the fixed denominator, so a later size can't shrink the percent.
     }
     const layersTotal = this.layers.size;
     return {
-      // `measurable` implies at least one layer, so the divide is safe.
-      percent: measurable ? clampPercent((completion / layersTotal) * 100) : undefined,
+      percent: layersTotal > 0 ? clampPercent((completion / layersTotal) * 100) : undefined,
       layersDone,
       layersTotal,
     };

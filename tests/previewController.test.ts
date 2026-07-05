@@ -897,7 +897,7 @@ describe('PreviewController — startup progress', () => {
     await flush();
 
     const before = sink.states.length;
-    progressFns[0]?.({ phase: 'pullingImage', percent: 99 }); // A's stale, late tick
+    progressFns[0]?.({ phase: 'pullingImage', layersDone: 1, layersTotal: 4 }); // A's stale, late tick
 
     assert.equal(sink.states.length, before, 'the superseded start’s progress is dropped');
   });

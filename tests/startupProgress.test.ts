@@ -7,39 +7,49 @@ describe('describeStartupProgress', () => {
   const statuses = (progress?: Parameters<typeof describeStartupProgress>[0]) =>
     describeStartupProgress(progress).steps.map((step) => step.status);
 
-  it('shows all three phases pending with an indeterminate bar before any event', () => {
+  it('marks the first step active before any event, so a loading indicator always shows', () => {
     const view = describeStartupProgress();
 
     assert.equal(view.heading, 'Starting preview…');
     assert.equal(view.percent, undefined);
     assert.deepEqual(
       view.steps.map((step) => step.label),
-      ['Downloading image', 'Starting container', 'Waiting for server'],
+      ['Downloading image', 'Starting container', 'Launching preview server'],
     );
-    assert.deepEqual(statuses(), ['pending', 'pending', 'pending']);
+    assert.deepEqual(statuses(), ['active', 'pending', 'pending']);
   });
 
-  it('marks the download step active with a percent note and a determinate bar during a pull', () => {
+  it('marks the download step active with a determinate bar and a layer-count note during a pull', () => {
     const view = describeStartupProgress({
       phase: 'pullingImage',
-      percent: 45,
-      layersDone: 2,
-      layersTotal: 5,
+      percent: 46,
+      layersDone: 3,
+      layersTotal: 11,
+      detail: 'Extracting f957de186774',
     });
 
-    assert.equal(view.percent, 45);
+    assert.equal(view.percent, 46); // the smooth overall download percentage drives the bar
     assert.deepEqual(
       view.steps.map((step) => step.status),
       ['active', 'pending', 'pending'],
     );
-    assert.equal(view.steps[0].note, '45%');
+    assert.equal(view.steps[0].note, '3/11 layers');
+    assert.equal(view.detail, 'Extracting f957de186774'); // the raw Docker status line
   });
 
-  it('falls back to a layer count while the pull percentage is not yet known', () => {
-    const view = describeStartupProgress({ phase: 'pullingImage', layersDone: 3, layersTotal: 8 });
+  it('shows 0% and a layer count at the very start of the download', () => {
+    const view = describeStartupProgress({ phase: 'pullingImage', percent: 0, layersDone: 0, layersTotal: 11 });
 
-    assert.equal(view.percent, undefined); // indeterminate until a total arrives
-    assert.equal(view.steps[0].note, '3/8 layers');
+    assert.equal(view.percent, 0);
+    assert.equal(view.steps[0].note, '0/11 layers');
+  });
+
+  it('stays indeterminate until the first layer is announced', () => {
+    const view = describeStartupProgress({ phase: 'pullingImage' });
+
+    assert.equal(view.percent, undefined);
+    assert.equal(view.steps[0].note, undefined);
+    assert.equal(view.steps[0].status, 'active');
   });
 
   it('marks the start step active with an indeterminate bar while the container starts', () => {
@@ -57,6 +67,7 @@ describe('describeStartupProgress', () => {
     const view = describeStartupProgress({ phase: 'waitingForServer', elapsedMs: 6200, timeoutMs: 60000 });
 
     assert.equal(view.percent, undefined);
+    assert.equal(view.detail, undefined); // the Docker status line only shows during the pull
     assert.deepEqual(
       view.steps.map((step) => step.status),
       ['done', 'done', 'active'],

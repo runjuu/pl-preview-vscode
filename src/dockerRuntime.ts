@@ -192,8 +192,8 @@ export class DockerPreviewRuntime implements PreviewRuntime {
 
   /**
    * Create the container, pulling the pinned image on the first-use "No such
-   * image" 404. The pull reports aggregate download progress through `onProgress`
-   * so the shell can show it in the "Starting preview…" overview.
+   * image" 404. The pull reports real per-layer download progress through
+   * `onProgress` so the shell can show it in the "Starting preview…" overview.
    */
   private async createContainer(
     courseRoot: string,
@@ -224,19 +224,22 @@ export class DockerPreviewRuntime implements PreviewRuntime {
     const aggregate = new PullProgressAggregator();
     const stream = await this.docker.pull(this.image);
     await new Promise<void>((resolve, reject) => {
+      // The latest human-readable status line, echoed both to the Output channel and
+      // onto the panel so the user sees exactly what Docker is doing. Events with
+      // nothing worth showing leave the previous line in place rather than blanking it.
+      let detail: string | undefined;
       this.docker.modem.followProgress(
         stream,
         (err) => (err ? reject(err) : resolve()),
         (event) => {
           const pullEvent = event as DockerPullEvent;
-          // Keep the detailed per-layer line in the Output channel for diagnostics…
           const status = formatPullStatus(pullEvent);
           if (status) {
             this.log(`[pl-preview] ${status}`);
+            detail = status;
           }
-          // …while the panel shows one aggregate download number.
           const { percent, layersDone, layersTotal } = aggregate.add(pullEvent);
-          onProgress?.({ phase: 'pullingImage', percent, layersDone, layersTotal });
+          onProgress?.({ phase: 'pullingImage', percent, layersDone, layersTotal, detail });
         },
       );
     });
