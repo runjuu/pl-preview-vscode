@@ -14,7 +14,7 @@ import type Docker from 'dockerode';
  * coordinated extension release rather than a silent drift. `resolvePreviewImage`
  * lets local development point at a self-built image.
  */
-export const DEFAULT_PREVIEW_IMAGE = 'ghcr.io/runjuu/prairielearn:sha-b046233@sha256:f096ed5b0cd18250e11f990dd0c5be8a6108e63173ffd0e4f2789420b8bfc94a';
+export const DEFAULT_PREVIEW_IMAGE = 'ghcr.io/runjuu/prairielearn:sha-6174117@sha256:10a67d6bdcadded0e87f314b7ef7b7f61507a8c63bb57ee4fd639bf296571007';
 
 /** Environment override used to point the extension at a locally-built image. */
 export const PREVIEW_IMAGE_ENV_VAR = 'PL_PREVIEW_IMAGE';
