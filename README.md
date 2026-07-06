@@ -20,7 +20,7 @@ small edit, leave your editor, find the right browser tab, click Load from
 disk, reload, then compare the result and hope you did not lose your place.
 Repeat that dozens of times, and the context switching starts to feel like the work. 🤨😩🫠
 
-PrairieLearn Preview turns that into a tighter loop: edit <-> preview.
+PrairieLearn Preview turns that into a tighter loop: edit ↔️ preview.
 
 ## Features
 
