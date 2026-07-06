@@ -8,7 +8,6 @@
     <a href="https://github.com/runjuu/pl-preview-vscode/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/runjuu/pl-preview-vscode/actions/workflows/ci.yml/badge.svg"></a>
     <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
     <a href="https://code.visualstudio.com/"><img alt="VS Code" src="https://img.shields.io/badge/VS%20Code-%5E1.90.0-007ACC"></a>
-    <a href="https://github.com/sponsors/runjuu"><img alt="Sponsor" src="https://img.shields.io/badge/sponsor-GitHub%20Sponsors-EA4AAA?logo=githubsponsors"></a>
   </p>
 </div>
 
@@ -16,30 +15,12 @@
 
 ## Why PrairieLearn Preview?
 
-If you write or TA for a PrairieLearn course, you know the old loop: ✏️ make a
-small edit, 🪟 leave your editor, find the right browser tab, click **Load from
-disk**, 🔄 reload, maybe 🎲 reroll a variant, then compare the result and hope
-you did not lose your place. Repeat that dozens of times, and the context
-switching starts to feel like the work 😩🙃🫠.
+If you write or TA for a PrairieLearn course, you know the old loop: make a
+small edit, leave your editor, find the right browser tab, click Load from
+disk, reload, then compare the result and hope you did not lose your place.
+Repeat that dozens of times, and the context switching starts to feel like the work. 🤨😩🫠
 
-PrairieLearn Preview turns that into a tighter loop: 1️⃣ edit with the preview
-beside you, 2️⃣ save, and 3️⃣ watch the question refresh.
-
-It is a live preview extension for PrairieLearn in VS Code, and it shortens that
-loop:
-
-- **Stay in your editor.** The rendered question stays beside your source and
-  follows the active question as you move between `question.html`, `server.py`,
-  and `info.json`.
-- **Save to see changes.** Edits render on save with a stable variant seed, so
-  before and after are easy to compare. Need a new variant? Use **New variant**.
-- **Skip the setup.** Open a course folder with `infoCourse.json`; PrairieLearn
-  Preview auto-detects a compatible runtime and manages the preview server for
-  you.
-
-PrairieLearn Preview is an independent, open-source companion to PrairieLearn's
-authoring tools, built for instructors, TAs, and course developers writing
-v3/Freeform questions.
+PrairieLearn Preview turns that into a tighter loop: 1️⃣ edit, 2️⃣ save, and 3️⃣ preview.
 
 ## Features
 
