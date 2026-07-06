@@ -215,6 +215,16 @@ export class PreviewController {
   }
 
   /**
+   * The display name of the question currently being previewed — its `info.json`
+   * title, or the qid as a fallback — or `undefined` when nothing is previewed.
+   * Lets the shell name a workspace tab after the question that opened it.
+   */
+  currentQuestionName(): string | undefined {
+    const target = this.currentTarget;
+    return target ? (target.title ?? target.qid) : undefined;
+  }
+
+  /**
    * Stop every running preview container on demand (the "Stop preview servers"
    * command). Clears the warm pool and returns the panel to the empty state; the
    * next edit or editor switch cold-starts a fresh container.

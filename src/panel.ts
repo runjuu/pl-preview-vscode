@@ -47,6 +47,22 @@ export function previewPanelTitle(questionName: string | undefined): string {
   return trimmed ? `${trimmed} (Preview)` : PREVIEW_PANEL_TITLE;
 }
 
+/**
+ * The panel tab title for a workspace opened from a previewed question: the
+ * question's name (its `info.json` title, or the qid fallback) suffixed with
+ * ` (Workspace)`, mirroring {@link previewPanelTitle}. Falls back to
+ * `Workspace <id>` when the opening question is unknown, or the plain
+ * {@link WORKSPACE_PANEL_TITLE} when even the id is missing.
+ */
+export function workspacePanelTitle(
+  questionName: string | undefined,
+  id: string | undefined,
+): string {
+  const trimmed = questionName?.trim();
+  if (trimmed) return `${trimmed} (Workspace)`;
+  return id ? `Workspace ${id}` : WORKSPACE_PANEL_TITLE;
+}
+
 /** Escape a string for safe interpolation into HTML text or an attribute value. */
 function escapeHtml(value: string): string {
   return value
@@ -511,18 +527,38 @@ export function previewPanelHtml({
 export interface WorkspacePanelInput {
   /** Loopback URL for the preview-server workspace page. */
   src: string;
+  /** Unguessable token required on host-to-webview status/reload messages. */
+  hostMessageToken?: string;
 }
 
-/** HTML for a workspace page opened from a rendered question in its own webview tab. */
-export function workspacePanelHtml({ src }: WorkspacePanelInput): string {
+/**
+ * HTML for a workspace page opened from a rendered question in its own webview tab.
+ *
+ * A thin control bar carries a live status dot/label and Reboot/Reset buttons above a
+ * full-bleed `<iframe>` pointed at the container's loopback origin. The buttons post
+ * `reboot`/`reset` to the extension host, which confirms with a native modal, drives the
+ * preview server's reboot/reset endpoints, and reloads the page. The webview cannot reach
+ * the loopback server itself (its CSP is `default-src 'none'`, blocking `connect-src`),
+ * so the host polls `/status` and pushes updates in via token-gated `postMessage`.
+ *
+ * The CSP relaxes `default-src 'none'` only far enough to frame that one origin
+ * (`frame-src <origin>`) plus a single nonce'd `script-src` for the toolbar wiring. The
+ * iframe sandbox mirrors the preview panel's (forms, popups, modals, downloads for
+ * interactive workspace UIs) and keeps `referrerpolicy="no-referrer"`.
+ */
+export function workspacePanelHtml({
+  src,
+  hostMessageToken = scriptNonce(),
+}: WorkspacePanelInput): string {
   const origin = new URL(src).origin;
+  const nonce = scriptNonce();
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; frame-src ${origin}; style-src 'unsafe-inline';"
+      content="default-src 'none'; frame-src ${origin}; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>${escapeHtml(WORKSPACE_PANEL_TITLE)}</title>
@@ -531,23 +567,139 @@ export function workspacePanelHtml({ src }: WorkspacePanelInput): string {
       body {
         height: 100%;
         margin: 0;
+        /* Override the host's default webview body padding so the toolbar and the
+           iframe render edge-to-edge instead of inset from the panel sides. */
         padding: 0;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        font-family: var(--vscode-font-family, sans-serif);
+      }
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.25rem 0.75rem;
+        font-size: 0.8rem;
+        color: var(--vscode-foreground);
+        background: var(--vscode-editorWidget-background, transparent);
+        border-bottom: 1px solid var(--vscode-widget-border, transparent);
+      }
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        color: var(--vscode-foreground);
+      }
+      /* The dot colour tracks the workspace state; the label carries the server's own
+         human-readable message. Chart colours read well on both light and dark themes. */
+      .status .dot {
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 50%;
+        background: var(--vscode-descriptionForeground, #888);
+      }
+      .status[data-state='running'] .dot {
+        background: var(--vscode-charts-green, #89d185);
+      }
+      .status[data-state='launching'] .dot,
+      .status[data-state='uninitialized'] .dot {
+        background: var(--vscode-charts-yellow, #e2c08d);
+      }
+      .status[data-state='failed'] .dot {
+        background: var(--vscode-charts-red, #f14c4c);
+      }
+      .actions {
+        margin-left: auto;
+        display: inline-flex;
+        gap: 0.5rem;
+      }
+      .btn {
+        font: inherit;
+        padding: 0.3rem 1rem;
+        color: var(--vscode-foreground);
+        background: transparent;
+        border: 1px solid var(--vscode-widget-border, rgba(128, 128, 128, 0.3));
+        border-radius: 4px;
+        cursor: pointer;
+        transition: background-color 0.15s ease, transform 0.1s ease;
+      }
+      .btn:hover {
+        background: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.15));
+      }
+      .btn:active {
+        transform: scale(0.96);
+      }
+      .btn:focus-visible {
+        outline: 1px solid var(--vscode-focusBorder);
+        outline-offset: 1px;
       }
       iframe {
         border: 0;
         display: block;
-        height: 100%;
         width: 100%;
+        min-height: 0;
+        flex: 1 1 auto;
       }
     </style>
   </head>
   <body>
+    <div class="toolbar">
+      <span class="status" data-state="uninitialized">
+        <span class="dot"></span>
+        <span class="status-label">Starting…</span>
+      </span>
+      <span class="actions">
+        <button
+          type="button"
+          class="btn reboot"
+          aria-label="Reboot workspace"
+          title="Restart the workspace container (files are kept)"
+        >Reboot</button>
+        <button
+          type="button"
+          class="btn reset"
+          aria-label="Reset workspace"
+          title="Discard all changes and restore the original files"
+        >Reset</button>
+      </span>
+    </div>
     <iframe
       src="${escapeHtml(src)}"
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
       referrerpolicy="no-referrer"
       title="${escapeHtml(WORKSPACE_PANEL_TITLE)}"
     ></iframe>
+    <script nonce="${nonce}">
+      const vscode = acquireVsCodeApi();
+      const hostMessageToken = ${JSON.stringify(hostMessageToken)};
+      const iframe = document.querySelector('iframe');
+      const status = document.querySelector('.status');
+      const statusLabel = document.querySelector('.status-label');
+      document.querySelector('.reboot').addEventListener('click', () => {
+        vscode.postMessage({ type: 'reboot' });
+      });
+      document.querySelector('.reset').addEventListener('click', () => {
+        vscode.postMessage({ type: 'reset' });
+      });
+      // The webview can't reach the loopback server (CSP default-src 'none'), so the host
+      // polls /status and pushes state in, and after a reboot/reset swaps the iframe in
+      // place rather than rebuilding the document — reassigning the panel HTML would
+      // repaint the toolbar too, which reads as a flash.
+      window.addEventListener('message', (event) => {
+        const message = event.data;
+        if (!message || message.token !== hostMessageToken) return;
+        if (message.type === 'status') {
+          if (typeof message.state === 'string') status.dataset.state = message.state;
+          if (typeof message.message === 'string') statusLabel.textContent = message.message;
+          return;
+        }
+        if (message.type === 'reload' && typeof message.src === 'string') {
+          iframe.src = message.src;
+        }
+      });
+    </script>
   </body>
 </html>`;
 }

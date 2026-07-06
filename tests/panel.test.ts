@@ -19,6 +19,7 @@ import {
   previewPanelTitle,
   startingPanelHtml,
   workspacePanelHtml,
+  workspacePanelTitle,
 } from '../src/panel';
 
 const packageRoot = path.dirname(__dirname);
@@ -328,6 +329,38 @@ describe('workspacePanelHtml', () => {
     assert.match(html, /allow-popups-to-escape-sandbox/i);
     assert.match(html, /referrerpolicy="no-referrer"/i);
   });
+
+  it('grants only its own nonce-tagged control-bar script', () => {
+    const html = workspacePanelHtml({ src });
+
+    assert.match(html, /script-src 'nonce-/);
+    assert.doesNotMatch(html, /script-src[^;]*'unsafe-inline'/i);
+  });
+
+  it('renders the status label and the Reboot/Reset controls', () => {
+    const html = workspacePanelHtml({ src });
+
+    assert.match(html, /class="status"/);
+    assert.match(html, /aria-label="Reboot workspace"/);
+    assert.match(html, /aria-label="Reset workspace"/);
+  });
+
+  it('wires the control bar to the host and gates host messages on the token', () => {
+    const html = workspacePanelHtml({ src });
+
+    assert.match(html, /acquireVsCodeApi\(\)/);
+    assert.match(html, /postMessage\(\{ type: 'reboot' \}\)/);
+    assert.match(html, /postMessage\(\{ type: 'reset' \}\)/);
+    assert.match(html, /message\.token !== hostMessageToken/);
+    assert.match(html, /message\.type === 'status'/);
+    assert.match(html, /message\.type === 'reload'/);
+  });
+
+  it('embeds the host message token so the webview can authenticate updates', () => {
+    const html = workspacePanelHtml({ src, hostMessageToken: 'ws-token' });
+
+    assert.match(html, /"ws-token"/);
+  });
 });
 
 describe('previewPanelTitle', () => {
@@ -342,5 +375,24 @@ describe('previewPanelTitle', () => {
   it('falls back to the default title for a missing or blank name', () => {
     assert.equal(previewPanelTitle(undefined), PREVIEW_PANEL_TITLE);
     assert.equal(previewPanelTitle('   '), PREVIEW_PANEL_TITLE);
+  });
+});
+
+describe('workspacePanelTitle', () => {
+  it("names the tab after the question, suffixed with (Workspace)", () => {
+    assert.equal(workspacePanelTitle('Random arithmetic', '1'), 'Random arithmetic (Workspace)');
+  });
+
+  it('trims surrounding whitespace before suffixing', () => {
+    assert.equal(workspacePanelTitle('  Spaced  ', '1'), 'Spaced (Workspace)');
+  });
+
+  it('falls back to the workspace id when the opening question is unknown', () => {
+    assert.equal(workspacePanelTitle(undefined, '7'), 'Workspace 7');
+    assert.equal(workspacePanelTitle('   ', '7'), 'Workspace 7');
+  });
+
+  it('falls back to the default title when neither name nor id is available', () => {
+    assert.equal(workspacePanelTitle(undefined, undefined), WORKSPACE_PANEL_TITLE);
   });
 });

@@ -348,6 +348,17 @@ describe('PreviewController — panel tab title', () => {
 
     assert.equal(sink.lastTitle, PREVIEW_PANEL_TITLE);
   });
+
+  it('exposes the current question name so a workspace tab can be named after it', async () => {
+    const { source, controller } = makeController(courseRoot);
+    assert.equal(controller.currentQuestionName(), undefined);
+
+    source.openFile(path.join(courseRoot, 'questions', 'arithmetic', 'question.html'));
+    await controller.start();
+    await flush();
+
+    assert.equal(controller.currentQuestionName(), 'Q arithmetic');
+  });
 });
 
 describe('PreviewController — refresh on save', () => {

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -16,7 +17,6 @@ import {
   REFRESH_PREVIEW_COMMAND,
   SHOW_LOGS_COMMAND,
   STOP_SERVERS_COMMAND,
-  WORKSPACE_PANEL_TITLE,
   WORKSPACE_VIEW_TYPE,
   emptyPanelHtml,
   errorPanelHtml,
@@ -24,6 +24,7 @@ import {
   previewPanelHtml,
   startingPanelHtml,
   workspacePanelHtml,
+  workspacePanelTitle,
 } from './panel';
 import {
   type Clock,
@@ -349,7 +350,8 @@ function ensurePanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
         return;
       }
       if (message?.type === 'openWorkspace' && typeof message.url === 'string') {
-        openWorkspacePanel(context, message.url);
+        // Name the workspace tab after the question that opened it, not its numeric id.
+        openWorkspacePanel(context, message.url, controller?.currentQuestionName());
       }
     },
     null,
@@ -370,7 +372,11 @@ function ensurePanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
   return panel;
 }
 
-function openWorkspacePanel(context: vscode.ExtensionContext, rawUrl: string): void {
+function openWorkspacePanel(
+  context: vscode.ExtensionContext,
+  rawUrl: string,
+  questionName?: string,
+): void {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -390,6 +396,12 @@ function openWorkspacePanel(context: vscode.ExtensionContext, rawUrl: string): v
     return;
   }
 
+  const id = url.pathname.match(/\/workspace\/([^/?#]+)\/?$/)?.[1];
+  if (!id) {
+    void vscode.window.showErrorMessage('PL Preview: Could not open workspace: missing workspace id.');
+    return;
+  }
+
   // Open the workspace as a sibling tab in the preview's own column rather than
   // `ViewColumn.Beside`: the preview tab is active when "Open workspace" is
   // clicked, so `Beside` would spawn a third column instead of reusing its space.
@@ -404,7 +416,7 @@ function openWorkspacePanel(context: vscode.ExtensionContext, rawUrl: string): v
 
   const workspacePanel = vscode.window.createWebviewPanel(
     WORKSPACE_VIEW_TYPE,
-    workspacePanelTitle(url),
+    workspacePanelTitle(questionName, safeDecodeURIComponent(id)),
     { preserveFocus: false, viewColumn: previewColumn },
     {
       enableScripts: true,
@@ -413,20 +425,87 @@ function openWorkspacePanel(context: vscode.ExtensionContext, rawUrl: string): v
     },
   );
 
+  // The control bar (status + Reboot/Reset) posts back here; host→webview status and
+  // reload messages carry this token so the webview rejects anything else.
+  const origin = url.origin;
+  const hostMessageToken = randomMessageToken();
+  let reloadNonce = 0;
+
   workspacePanels.set(key, workspacePanel);
-  workspacePanel.webview.html = workspacePanelHtml({ src: key });
+  workspacePanel.webview.html = workspacePanelHtml({ src: key, hostMessageToken });
+
+  workspacePanel.webview.onDidReceiveMessage(
+    async (message: { type?: string } | undefined) => {
+      const action = message?.type;
+      if (action !== 'reboot' && action !== 'reset') return;
+
+      // Confirm natively — the whole reason these controls moved to the host is that the
+      // webview suppresses window.confirm(). Reset is destructive (wipes files); Reboot
+      // restarts the container but keeps them.
+      const confirm =
+        action === 'reboot'
+          ? {
+              detail: 'The container restarts; workspace files are kept but running programs stop.',
+              label: 'Reboot',
+              title: 'Reboot this workspace?',
+            }
+          : {
+              detail: 'This permanently discards all changes and restores the original files.',
+              label: 'Reset',
+              title: 'Reset this workspace?',
+            };
+
+      const choice = await vscode.window.showWarningMessage(
+        confirm.title,
+        { detail: confirm.detail, modal: true },
+        confirm.label,
+      );
+      if (choice !== confirm.label) return;
+
+      const ok = await postWorkspaceAction(origin, id, action);
+      if (!ok) {
+        void vscode.window.showErrorMessage(`PL Preview: ${confirm.label} failed.`);
+        return;
+      }
+
+      // The container URL is stable, so the still-mounted page won't swap containers on
+      // its own — reload the workspace page (cache-busted) to pick up the fresh one.
+      const reload = new URL(key);
+      reload.searchParams.set('__plReload', String(++reloadNonce));
+      void workspacePanel.webview.postMessage({
+        src: reload.toString(),
+        token: hostMessageToken,
+        type: 'reload',
+      });
+    },
+    null,
+    context.subscriptions,
+  );
+
+  // Poll the workspace status so the control bar's dot/label stay live. Plain `/status`
+  // is a pure read (no `?heartbeat=1`), so it never extends the workspace's activity
+  // window — the inner iframe already sends its own visibility-gated heartbeat.
+  const statusTimer = setInterval(() => {
+    if (!workspacePanel.visible) return;
+    void getWorkspaceStatus(origin, id).then((status) => {
+      if (!status) return;
+      void workspacePanel.webview.postMessage({
+        message: status.message,
+        state: status.state,
+        token: hostMessageToken,
+        type: 'status',
+      });
+    });
+  }, 1000);
+
   workspacePanel.onDidDispose(
     () => {
+      clearInterval(statusTimer);
       workspacePanels.delete(key);
     },
     null,
     context.subscriptions,
   );
-}
-
-function workspacePanelTitle(url: URL): string {
-  const id = url.pathname.match(/\/workspace\/([^/?#]+)\/?$/)?.[1];
-  return id ? `Workspace ${safeDecodeURIComponent(id)} (Preview)` : WORKSPACE_PANEL_TITLE;
 }
 
 function isLoopbackWorkspaceUrl(url: URL): boolean {
@@ -439,6 +518,79 @@ function isLoopbackWorkspaceUrl(url: URL): boolean {
 
 function randomMessageToken(): string {
   return randomBytes(16).toString('hex');
+}
+
+const WORKSPACE_ACTION_TIMEOUT_MS = 10000;
+const WORKSPACE_STATUS_TIMEOUT_MS = 4000;
+
+/**
+ * POST a reboot/reset to the preview server's workspace endpoint over loopback. Resolves
+ * true on a 2xx, false on any non-2xx / network error / timeout — the caller surfaces the
+ * failure and skips the reload.
+ */
+function postWorkspaceAction(
+  origin: string,
+  id: string,
+  action: 'reboot' | 'reset',
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = http.request(
+      `${origin}/workspace/${id}/${action}`,
+      { method: 'POST' },
+      (res) => {
+        res.resume();
+        const status = res.statusCode ?? 0;
+        resolve(status >= 200 && status < 300);
+      },
+    );
+    req.setTimeout(WORKSPACE_ACTION_TIMEOUT_MS, () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.on('error', () => resolve(false));
+    req.end();
+  });
+}
+
+/**
+ * GET the workspace status JSON over loopback for the control-bar poll. Resolves null on
+ * any non-200 / parse / network error / timeout, so a transient blip just skips one tick.
+ */
+function getWorkspaceStatus(
+  origin: string,
+  id: string,
+): Promise<{ message: string; state: string } | null> {
+  return new Promise((resolve) => {
+    const req = http.get(`${origin}/workspace/${id}/status`, (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        resolve(null);
+        return;
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => {
+        body += chunk;
+      });
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(body) as { message?: unknown; state?: unknown };
+          if (typeof parsed.state === 'string' && typeof parsed.message === 'string') {
+            resolve({ message: parsed.message, state: parsed.state });
+          } else {
+            resolve(null);
+          }
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    req.setTimeout(WORKSPACE_STATUS_TIMEOUT_MS, () => {
+      req.destroy();
+      resolve(null);
+    });
+    req.on('error', () => resolve(null));
+  });
 }
 
 function safeDecodeURIComponent(value: string): string {
