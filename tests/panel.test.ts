@@ -28,7 +28,7 @@ function readManifest(): { contributes: { commands: Array<{ command: string; tit
   return JSON.parse(readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
 }
 
-describe('PL Preview panel', () => {
+describe('PrairieLearn Preview panel', () => {
   it('renders a complete standalone HTML document', () => {
     const html = emptyPanelHtml();
 
@@ -53,7 +53,7 @@ describe('PL Preview panel', () => {
     const openCommand = commands.find((command) => command.command === OPEN_PREVIEW_COMMAND);
 
     assert.ok(openCommand, `manifest must contribute ${OPEN_PREVIEW_COMMAND}`);
-    assert.equal(openCommand.title, 'Open PL Preview');
+    assert.equal(openCommand.title, 'Open Preview');
   });
 
   it('contributes the refresh-preview command declared by the constant', () => {
@@ -245,7 +245,7 @@ describe('previewPanelHtml', () => {
     assert.match(html, /iframe\.src = message\.src/);
   });
 
-  it('drops the redundant inner "PL Preview" heading now the tab names the question', () => {
+  it('drops the redundant inner PrairieLearn Preview heading now the tab names the question', () => {
     const html = previewPanelHtml({ src, variant: '1' });
 
     // The old toolbar heading span is gone; the question name lives on the tab.

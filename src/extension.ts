@@ -217,7 +217,7 @@ class WebviewPreviewSink implements PreviewViewSink {
         this.showDocument(errorPanelHtml(state.message));
         // Fail loudly with a one-click path to the traceback in the Output channel.
         void vscode.window
-          .showErrorMessage(`PL Preview: ${state.message}`, 'Show logs')
+          .showErrorMessage(`PrairieLearn Preview: ${state.message}`, 'Show logs')
           .then((choice) => {
             if (choice === 'Show logs') this.output.show(true);
           });
@@ -381,24 +381,24 @@ function openWorkspacePanel(
   try {
     url = new URL(rawUrl);
   } catch {
-    void vscode.window.showErrorMessage('PL Preview: Could not open workspace: invalid URL.');
+    void vscode.window.showErrorMessage('PrairieLearn Preview: Could not open workspace: invalid URL.');
     return;
   }
 
   if (!isLoopbackWorkspaceUrl(url)) {
-    void vscode.window.showErrorMessage('PL Preview: Could not open workspace: unexpected URL.');
+    void vscode.window.showErrorMessage('PrairieLearn Preview: Could not open workspace: unexpected URL.');
     return;
   }
 
   const port = Number(url.port);
   if (!Number.isInteger(port) || port <= 0) {
-    void vscode.window.showErrorMessage('PL Preview: Could not open workspace: missing preview port.');
+    void vscode.window.showErrorMessage('PrairieLearn Preview: Could not open workspace: missing preview port.');
     return;
   }
 
   const id = url.pathname.match(/\/workspace\/([^/?#]+)\/?$/)?.[1];
   if (!id) {
-    void vscode.window.showErrorMessage('PL Preview: Could not open workspace: missing workspace id.');
+    void vscode.window.showErrorMessage('PrairieLearn Preview: Could not open workspace: missing workspace id.');
     return;
   }
 
@@ -464,7 +464,7 @@ function openWorkspacePanel(
 
       const ok = await postWorkspaceAction(origin, id, action);
       if (!ok) {
-        void vscode.window.showErrorMessage(`PL Preview: ${confirm.label} failed.`);
+        void vscode.window.showErrorMessage(`PrairieLearn Preview: ${confirm.label} failed.`);
         return;
       }
 
@@ -754,7 +754,7 @@ async function resetRuntime(): Promise<void> {
 
 function getOutput(): vscode.OutputChannel {
   if (!output) {
-    output = vscode.window.createOutputChannel('PL Preview');
+    output = vscode.window.createOutputChannel('PrairieLearn Preview');
   }
   return output;
 }
@@ -823,7 +823,7 @@ async function ensureRuntimeReady(): Promise<boolean> {
       buildRuntime(selection.candidate);
       return true;
     case 'configError':
-      void vscode.window.showErrorMessage(`PL Preview: ${selection.message}`);
+      void vscode.window.showErrorMessage(`PrairieLearn Preview: ${selection.message}`);
       return false;
     case 'unavailable':
       return handleUnavailable(selection, ctx);
@@ -845,7 +845,7 @@ async function handleUnavailable(
 
   if (profile.id === 'custom') {
     void vscode.window.showErrorMessage(
-      `PL Preview: Could not reach the container runtime at ${describeEndpoint(candidate.endpoint)}. Check the "plPreview.containerHost" setting, then run the preview again.`,
+      `PrairieLearn Preview: Could not reach the container runtime at ${describeEndpoint(candidate.endpoint)}. Check the "plPreview.containerHost" setting, then run the preview again.`,
     );
     return false;
   }
@@ -864,7 +864,7 @@ async function handleUnavailable(
   const showButton = action?.kind === 'openUrl' || (action?.kind === 'startRuntime' && launch);
   const buttons = showButton && action ? [action.label] : [];
 
-  const choice = await vscode.window.showErrorMessage(`PL Preview: ${remediation.message}`, ...buttons);
+  const choice = await vscode.window.showErrorMessage(`PrairieLearn Preview: ${remediation.message}`, ...buttons);
   if (!action || choice !== action.label) {
     return false;
   }
@@ -903,7 +903,7 @@ async function launchRuntimeAndWait(action: RuntimeStartAction, candidate: Runti
     getOutput().appendLine(`[pl-preview] could not run "${action.label}": ${launched.detail}`);
     void vscode.window
       .showErrorMessage(
-        `PL Preview: Could not run "${action.label}". Start ${candidate.profile.displayName} manually, then run the preview again.`,
+        `PrairieLearn Preview: Could not run "${action.label}". Start ${candidate.profile.displayName} manually, then run the preview again.`,
         'Show logs',
       )
       .then((choice) => {
@@ -979,7 +979,7 @@ async function waitForRuntimeAfterLaunch(candidate: RuntimeCandidate): Promise<b
   return vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: `PL Preview: Waiting for ${candidate.profile.displayName} to start…`,
+      title: `PrairieLearn Preview: Waiting for ${candidate.profile.displayName} to start…`,
       cancellable: true,
     },
     async (_progress, token) => {
@@ -994,7 +994,7 @@ async function waitForRuntimeAfterLaunch(candidate: RuntimeCandidate): Promise<b
         await delay(RUNTIME_START_POLL_INTERVAL_MS);
       }
       void vscode.window.showWarningMessage(
-        `PL Preview: ${candidate.profile.displayName} is taking longer than expected to start. Run the preview again once it is ready.`,
+        `PrairieLearn Preview: ${candidate.profile.displayName} is taking longer than expected to start. Run the preview again once it is ready.`,
       );
       return false;
     },

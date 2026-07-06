@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to PL Preview will be documented in this file.
+All notable changes to PrairieLearn Preview will be documented in this file.
 
 ## Unreleased
 

@@ -1,5 +1,5 @@
 /**
- * Pure helpers and identifiers for the PL Preview webview panel.
+ * Pure helpers and identifiers for the PrairieLearn Preview webview panel.
  *
  * Kept free of any `vscode` import so it can be unit-tested with `tsx --test`.
  * Covers the empty, cold-start (with its live startup overview), and
@@ -31,16 +31,16 @@ export const PREVIEW_VIEW_TYPE = 'plPreview.panel';
 export const WORKSPACE_VIEW_TYPE = 'plPreview.workspace';
 
 /** Default tab title, shown before a question resolves and in the empty state. */
-export const PREVIEW_PANEL_TITLE = 'PL Preview';
+export const PREVIEW_PANEL_TITLE = 'PrairieLearn Preview';
 
 /** Default tab title for workspace pages opened from a preview. */
-export const WORKSPACE_PANEL_TITLE = 'PL Workspace';
+export const WORKSPACE_PANEL_TITLE = 'PrairieLearn Workspace';
 
 /**
  * The panel tab title for a previewed question: its `info.json` title (the caller
  * falls back to the qid when it is missing) suffixed with ` (Preview)`, or the
  * plain {@link PREVIEW_PANEL_TITLE} when nothing is being previewed. This is what
- * lets the tab name the question instead of a generic "PL Preview".
+ * lets the tab name the question instead of a generic preview title.
  */
 export function previewPanelTitle(questionName: string | undefined): string {
   const trimmed = questionName?.trim();
@@ -323,7 +323,7 @@ export function notPreviewablePanelHtml(type: string): string {
   const named = type.trim().length > 0 ? `“${type}”` : 'this';
   return messageStateHtml(
     'Not previewable for this type',
-    `PL Preview renders v3 (Freeform) questions. ${named} questions are a known limitation and are not previewed.`,
+    `PrairieLearn Preview renders v3 (Freeform) questions. ${named} questions are a known limitation and are not previewed.`,
   );
 }
 
@@ -336,7 +336,7 @@ export function notPreviewablePanelHtml(type: string): string {
 export function errorPanelHtml(message: string): string {
   return messageStateHtml(
     'Preview failed',
-    `${message}. Run “PL Preview: Show logs” from the Command Palette to view the full logs.`,
+    `${message}. Run “PrairieLearn Preview: Show logs” from the Command Palette to view the full logs.`,
   );
 }
 
@@ -358,7 +358,7 @@ export interface PreviewPanelInput {
  * Preview Variant and a "New variant" button, above an `<iframe>` pointed at the
  * container's loopback origin. The question's name lives on the panel *tab* (set
  * by the controller via {@link previewPanelTitle}), so the toolbar no longer
- * repeats a redundant "PL Preview" heading.
+ * repeats a redundant PrairieLearn Preview heading.
  *
  * The CSP relaxes `default-src 'none'` only far enough to frame that one origin
  * (`frame-src <origin>`), so the preview server's absolute-from-root asset URLs

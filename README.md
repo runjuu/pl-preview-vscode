@@ -1,6 +1,6 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/runjuu/pl-preview-vscode/main/media/icon-original.png" alt="PL Preview icon" width="180">
-  <h1>PL Preview for VS Code</h1>
+  <img src="https://raw.githubusercontent.com/runjuu/pl-preview-vscode/main/media/icon-original.png" alt="PrairieLearn Preview icon" width="180">
+  <h1>PrairieLearn Preview for VS Code</h1>
   <p><strong>Live, in-editor PrairieLearn question previews — rendered beside your code as you write.</strong></p>
   <p>
     <a href="https://marketplace.visualstudio.com/items?itemName=runjuu.pl-preview-vscode"><img alt="VS Code Marketplace" src="https://vsmarketplacebadges.dev/version-short/runjuu.pl-preview-vscode.svg?label=VS%20Code%20Marketplace"></a>
@@ -13,17 +13,17 @@
 
 Preview PrairieLearn questions **beside the files you are editing** without
 running a full local instance, clicking *Load from disk*, or reloading a browser
-tab after every change. PL Preview uses Docker or Podman to start a local,
+tab after every change. PrairieLearn Preview uses Docker or Podman to start a local,
 container-backed preview server for your course, then renders the active
 question in a VS Code webview that refreshes when you save.
 
-[![PL Preview demo](https://raw.githubusercontent.com/runjuu/pl-preview-vscode/main/media/demo-preview.gif)](https://github.com/runjuu/pl-preview-vscode/raw/main/media/demo.mp4)
+[![PrairieLearn Preview demo](https://raw.githubusercontent.com/runjuu/pl-preview-vscode/main/media/demo-preview.gif)](https://github.com/runjuu/pl-preview-vscode/raw/main/media/demo.mp4)
 
-## Why PL Preview?
+## Why PrairieLearn Preview?
 
 If you author or TA a PrairieLearn course, you know the loop: edit a question,
 switch to the browser, click **Load from disk**, reload, maybe reroll a variant,
-and then check whether one small change worked. PL Preview is a live preview
+and then check whether one small change worked. PrairieLearn Preview is a live preview
 extension for PrairieLearn in VS Code, and it shortens that loop:
 
 - **Stay in your editor.** The rendered question stays beside your source and follows
@@ -31,10 +31,10 @@ extension for PrairieLearn in VS Code, and it shortens that loop:
   `info.json`.
 - **Save to see changes.** Edits render on save with a stable variant seed, so
   before and after are easy to compare. Need a new variant? Use **New variant**.
-- **Skip the setup.** Open a course folder with `infoCourse.json`; PL Preview
+- **Skip the setup.** Open a course folder with `infoCourse.json`; PrairieLearn Preview
   auto-detects Docker or Podman and manages the preview server for you.
 
-PL Preview is an independent, open-source companion to PrairieLearn's authoring
+PrairieLearn Preview is an independent, open-source companion to PrairieLearn's authoring
 tools, built for instructors, TAs, and course developers writing v3/Freeform
 questions.
 
@@ -49,7 +49,7 @@ questions.
 - Reroll the current question with **New variant**.
 - Use Docker, Podman, or a compatible local container runtime.
 - Preview **workspace questions** without leaving VS Code.
-- Show render and container logs from the **PL Preview** Output channel.
+- Show render and container logs from the **PrairieLearn Preview** Output channel.
 - Keep preview servers warm for recently used courses, with a command to stop
   them when you are done.
 
@@ -65,7 +65,7 @@ questions.
 
 ## Install
 
-Install **PL Preview** from your editor's extension registry:
+Install **PrairieLearn Preview** from your editor's extension registry:
 
 - **VS Code Marketplace:** search for `runjuu.pl-preview-vscode` in the
   Extensions view, or open the
@@ -74,7 +74,7 @@ Install **PL Preview** from your editor's extension registry:
   [`runjuu.pl-preview-vscode`](https://open-vsx.org/extension/runjuu/pl-preview-vscode)
   in VSCodium or another Open VSX-compatible editor.
 
-PL Preview activates when your workspace contains a PrairieLearn
+PrairieLearn Preview activates when your workspace contains a PrairieLearn
 `infoCourse.json` file.
 
 ## Quick Start
@@ -91,19 +91,19 @@ starts.
 
 ## Commands
 
-You can also run PL Preview commands from the Command Palette:
+You can also run PrairieLearn Preview commands from the Command Palette:
 
 | Command | What it does |
 | --- | --- |
-| **PL Preview: Open PL Preview** | Opens the side-by-side preview for the active question. |
-| **PL Preview: Refresh preview** | Re-renders the current preview immediately. |
-| **PL Preview: New variant** | Rerolls the current question's variant seed. |
-| **PL Preview: Show logs** | Opens the **PL Preview** Output channel. |
-| **PL Preview: Stop preview servers** | Stops all running local preview servers. |
+| **PrairieLearn Preview: Open Preview** | Opens the side-by-side preview for the active question. |
+| **PrairieLearn Preview: Refresh preview** | Re-renders the current preview immediately. |
+| **PrairieLearn Preview: New variant** | Rerolls the current question's variant seed. |
+| **PrairieLearn Preview: Show logs** | Opens the **PrairieLearn Preview** Output channel. |
+| **PrairieLearn Preview: Stop preview servers** | Stops all running local preview servers. |
 
 ## Container runtime
 
-PL Preview runs the preview server in a local container using any
+PrairieLearn Preview runs the preview server in a local container using any
 Docker-Engine-API-compatible runtime. By default it auto-detects one — Docker's
 socket first, then Podman's — so Docker Desktop, Podman, Colima, Rancher Desktop,
 and OrbStack all work with no configuration.
@@ -119,7 +119,7 @@ To choose a runtime explicitly, set these in VS Code settings:
 When multiple runtimes are running and `auto` is selected, Docker is preferred;
 set `plPreview.containerRuntime` to `podman` to force Podman.
 
-If the selected runtime is installed but stopped, PL Preview can help start it
+If the selected runtime is installed but stopped, PrairieLearn Preview can help start it
 before opening the preview.
 
 **Podman on macOS/Windows.** Podman runs inside a `podman machine` VM whose socket
@@ -133,7 +133,7 @@ machine's socket (from `podman machine inspect`). On Linux, the rootless socket
 
 Workspace questions run an interactive per-variant container (a terminal, VS Code
 in the browser, JupyterLab, and so on). To preview one, the preview server must be
-able to launch that container itself, so PL Preview mounts the container runtime
+able to launch that container itself, so PrairieLearn Preview mounts the container runtime
 socket into the preview container and connects both to a shared per-course network.
 Everything is proxied through the preview server, so the live workspace opens in a
 separate VS Code tab beside the preview — click **Open workspace** on a workspace
@@ -143,7 +143,7 @@ workspace when you need a fresh run.
 Because this lets previewed course code talk to your container runtime (which is
 root-equivalent with a rootful daemon), it is enabled only when **both** hold:
 
-- **The workspace is trusted.** PL Preview declares limited support for untrusted
+- **The workspace is trusted.** PrairieLearn Preview declares limited support for untrusted
   workspaces, so other question types still preview in an untrusted folder, but
   workspace previews stay off until you trust the workspace. You can also turn the
   feature off entirely with `plPreview.enableWorkspaces: false`.
@@ -184,12 +184,12 @@ image and warm preview servers.
 
 **The panel says the question type is not previewable.**
 
-PL Preview renders v3/Freeform questions. Check the question's `info.json`.
+PrairieLearn Preview renders v3/Freeform questions. Check the question's `info.json`.
 
 **The preview failed.**
 
-Run **PL Preview: Show logs** from the Command Palette and check the **PL
-Preview** Output channel for the full render or container error.
+Run **PrairieLearn Preview: Show logs** from the Command Palette and check the
+**PrairieLearn Preview** Output channel for the full render or container error.
 
 ## Development
 

@@ -1,6 +1,6 @@
 {
   "name": "pl-preview-vscode",
-  "displayName": "PL Preview — Live PrairieLearn Question Preview",
+  "displayName": "PrairieLearn Preview",
   "description": "Preview PrairieLearn questions side by side in VS Code. Save your edits and the rendered question refreshes instantly from a local server running in Docker or Podman.",
   "version": "1.0.0",
   "publisher": "runjuu",
@@ -53,29 +53,29 @@
     "commands": [
       {
         "command": "plPreview.openPreview",
-        "title": "Open PL Preview",
-        "category": "PL Preview",
+        "title": "Open Preview",
+        "category": "PrairieLearn Preview",
         "icon": "$(open-preview)"
       },
       {
         "command": "plPreview.refreshPreview",
         "title": "Refresh preview",
-        "category": "PL Preview"
+        "category": "PrairieLearn Preview"
       },
       {
         "command": "plPreview.newVariant",
         "title": "New variant",
-        "category": "PL Preview"
+        "category": "PrairieLearn Preview"
       },
       {
         "command": "plPreview.showLogs",
         "title": "Show logs",
-        "category": "PL Preview"
+        "category": "PrairieLearn Preview"
       },
       {
         "command": "plPreview.stopServers",
         "title": "Stop preview servers",
-        "category": "PL Preview"
+        "category": "PrairieLearn Preview"
       }
     ],
     "menus": {
@@ -88,7 +88,7 @@
       ]
     },
     "configuration": {
-      "title": "PL Preview",
+      "title": "PrairieLearn Preview",
       "properties": {
         "plPreview.containerRuntime": {
           "type": "string",

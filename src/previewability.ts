@@ -5,7 +5,7 @@ import { type PreviewTarget, resolvePreviewTarget } from './previewTarget';
  * Keep a context key in sync with whether the active file is a previewable
  * PrairieLearn question, so the manifest can show a click-to-preview icon on
  * question files (like the built-in Markdown/HTML preview icon) instead of
- * requiring the "Open PL Preview" command.
+ * requiring the "Open Preview" command.
  *
  * Previewability isn't something a static `when` clause can express — it depends
  * on the file living under a course's `questions/<qid>/` tree, which means
