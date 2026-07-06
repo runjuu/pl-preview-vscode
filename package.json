@@ -135,12 +135,18 @@
     "test": "tsx --test tests/*.test.ts",
     "update-image": "node scripts/update-preview-image.mjs",
     "test:coverage": "c8 node --import tsx --test tests/*.test.ts",
+    "release:check": "pnpm run typecheck && pnpm run test && pnpm run build",
+    "release": "bumpp --git-check --execute \"pnpm run release:check\"",
+    "release:patch": "bumpp --release patch --git-check --execute \"pnpm run release:check\"",
+    "release:minor": "bumpp --release minor --git-check --execute \"pnpm run release:check\"",
+    "release:major": "bumpp --release major --git-check --execute \"pnpm run release:check\"",
     "vscode:prepublish": "pnpm run build"
   },
   "devDependencies": {
     "@types/dockerode": "^4.0.1",
     "@types/node": "^24.10.1",
     "@types/vscode": "^1.90.0",
+    "bumpp": "^11.1.0",
     "c8": "^11.0.0",
     "esbuild": "^0.28.1",
     "tsx": "^4.21.0",

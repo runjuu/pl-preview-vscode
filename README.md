@@ -196,3 +196,11 @@ Extension Development Host. Open a PrairieLearn course folder, open a question
 file, and click the preview button in the editor title bar.
 
 Use `PL_PREVIEW_IMAGE` to point the extension at a self-built preview image.
+
+## Release
+
+1. Move the relevant `CHANGELOG.md` entries out of **Unreleased**, commit that
+   changelog update, and start from a clean working tree.
+2. Run `pnpm run release` to choose the next version interactively, or run
+   `pnpm run release:patch`, `pnpm run release:minor`, or
+   `pnpm run release:major`.
