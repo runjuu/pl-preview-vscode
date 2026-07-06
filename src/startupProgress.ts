@@ -18,9 +18,14 @@
  * overall download percentage and how many layers have landed (the container start
  * and the readiness wait are indeterminate).
  */
+interface PreviewImageProgressInfo {
+  /** Short version/tag for the preview image, e.g. `sha-1c3e05a` or `dev`. */
+  readonly imageVersion?: string;
+}
+
 export type PreviewStartupProgress =
   /** First-use image download, reported as real download progress. */
-  | {
+  | ({
       readonly phase: 'pullingImage';
       /** Smooth overall download completion (0–100) across every layer. */
       readonly percent?: number;
@@ -28,18 +33,18 @@ export type PreviewStartupProgress =
       readonly layersTotal?: number;
       /** The latest raw Docker pull status line, e.g. `Extracting f957de186774`. */
       readonly detail?: string;
-    }
+    } & PreviewImageProgressInfo)
   /** The image is present; the container is being created and started. */
-  | { readonly phase: 'startingContainer' }
+  | ({ readonly phase: 'startingContainer' } & PreviewImageProgressInfo)
   /** The container is up; we are polling until the preview server answers. */
-  | { readonly phase: 'waitingForServer'; readonly elapsedMs: number; readonly timeoutMs: number };
+  | ({ readonly phase: 'waitingForServer'; readonly elapsedMs: number; readonly timeoutMs: number } & PreviewImageProgressInfo);
 
 /** One row of the startup stepper. */
 export type StartupStepStatus = 'done' | 'active' | 'pending';
 export interface StartupStep {
   readonly label: string;
   readonly status: StartupStepStatus;
-  /** Short trailing detail on the active step (e.g. `"45%"`, `"3/8 layers"`, `"6s"`). */
+  /** Short trailing detail for the step (e.g. `"sha-1c3e05a · 3/8 layers"`, `"6s"`). */
   readonly note?: string;
 }
 
@@ -50,14 +55,14 @@ export interface StartupProgressView {
   readonly percent?: number;
   /** The latest raw Docker status line, shown under the stepper during a pull. */
   readonly detail?: string;
-  /** Exactly three rows, in fixed order (download → start → wait). */
+  /** Exactly three rows, in fixed order (pull → start → wait). */
   readonly steps: readonly StartupStep[];
 }
 
 const STARTING_HEADING = 'Starting preview…';
 
 /** The three startup phases, in order; the index doubles as the stepper row order. */
-const STEP_LABELS = ['Downloading image', 'Starting container', 'Launching preview server'] as const;
+const STEP_LABELS = ['Pulling preview image', 'Starting preview container', 'Launching preview server'] as const;
 const PHASE_INDEX: Record<PreviewStartupProgress['phase'], number> = {
   pullingImage: 0,
   startingContainer: 1,
@@ -70,7 +75,7 @@ const PHASE_INDEX: Record<PreviewStartupProgress['phase'], number> = {
  * initial "starting" state before any event) falls back to the first step being
  * `active`, so there is always exactly one step spinning its loading indicator.
  * Only the image pull contributes a `percent`. A cached image jumps straight to
- * `startingContainer`, so the download step reads `done` without ever having been
+ * `startingContainer`, so the pull step reads `done` without ever having been
  * `active` — accurate enough, and simpler than threading "did a pull happen"
  * history through the view.
  */
@@ -80,7 +85,8 @@ export function describeStartupProgress(progress?: PreviewStartupProgress): Star
   const steps = STEP_LABELS.map((label, index): StartupStep => {
     const status: StartupStepStatus =
       index < activeIndex ? 'done' : index === activeIndex ? 'active' : 'pending';
-    return status === 'active' && note ? { label, status, note } : { label, status };
+    const stepNote = noteForStep(index, status, progress, note);
+    return stepNote ? { label, status, note: stepNote } : { label, status };
   });
   return {
     heading: STARTING_HEADING,
@@ -90,18 +96,63 @@ export function describeStartupProgress(progress?: PreviewStartupProgress): Star
   };
 }
 
+/** Short version label from a Docker image reference, safe for compact UI notes. */
+export function previewImageVersion(imageRef: string): string | undefined {
+  const raw = imageRef.trim();
+  if (!raw) return undefined;
+
+  const digestSeparator = raw.indexOf('@');
+  const beforeDigest = digestSeparator >= 0 ? raw.slice(0, digestSeparator) : raw;
+  const digest = digestSeparator >= 0 ? raw.slice(digestSeparator + 1) : undefined;
+  const lastSlash = beforeDigest.lastIndexOf('/');
+  const lastColon = beforeDigest.lastIndexOf(':');
+  if (lastColon > lastSlash && lastColon < beforeDigest.length - 1) {
+    return beforeDigest.slice(lastColon + 1);
+  }
+  return digest ? shortDigest(digest) : undefined;
+}
+
+function shortDigest(digest: string): string | undefined {
+  const raw = digest.trim();
+  if (!raw) return undefined;
+  const [algorithm, hash] = raw.split(':', 2);
+  if (algorithm && hash) return `${algorithm}:${hash.slice(0, 12)}`;
+  return raw.length > 24 ? `${raw.slice(0, 24)}…` : raw;
+}
+
+function noteForStep(
+  index: number,
+  status: StartupStepStatus,
+  progress: PreviewStartupProgress | undefined,
+  activeNote: string | undefined,
+): string | undefined {
+  if (index === 0) return pullStepNote(progress);
+  return status === 'active' ? activeNote : undefined;
+}
+
+function pullStepNote(progress: PreviewStartupProgress | undefined): string | undefined {
+  if (!progress) return undefined;
+  const layerNote = progress.phase === 'pullingImage' ? pullingLayerNote(progress) : undefined;
+  if (progress.imageVersion && layerNote) return `${progress.imageVersion} · ${layerNote}`;
+  return progress.imageVersion ?? layerNote;
+}
+
 /** The trailing detail for the active step, when the phase carries one. */
 function activeStepNote(progress?: PreviewStartupProgress): string | undefined {
   if (!progress) return undefined;
   switch (progress.phase) {
     case 'pullingImage':
-      // The smooth `percent` drives the bar; the note carries the concrete layer
-      // count, which climbs as each concurrent download lands.
-      if (progress.layersTotal) return `${progress.layersDone ?? 0}/${progress.layersTotal} layers`;
-      return undefined;
+      return pullingLayerNote(progress);
     case 'startingContainer':
       return undefined;
     case 'waitingForServer':
       return `${Math.round(progress.elapsedMs / 1000)}s`;
   }
+}
+
+function pullingLayerNote(progress: Extract<PreviewStartupProgress, { phase: 'pullingImage' }>): string | undefined {
+  // The smooth `percent` drives the bar; the note carries the concrete layer
+  // count, which climbs as each concurrent download lands.
+  if (progress.layersTotal) return `${progress.layersDone ?? 0}/${progress.layersTotal} layers`;
+  return undefined;
 }

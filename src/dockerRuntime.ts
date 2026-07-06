@@ -22,7 +22,7 @@ import {
   formatPullStatus,
 } from './runtimeDetection';
 import { previewOrigin } from './previewUrl';
-import type { PreviewStartupProgress } from './startupProgress';
+import { previewImageVersion, type PreviewStartupProgress } from './startupProgress';
 
 /**
  * Thin dockerode adapter: launches and tears down Local Preview Containers.
@@ -117,6 +117,7 @@ interface RunningContainer {
 export class DockerPreviewRuntime implements PreviewRuntime {
   private readonly docker: Docker;
   private readonly image: string;
+  private readonly imageVersion: string | undefined;
   private readonly cliNames: readonly string[];
   private readonly log: (line: string) => void;
   private readonly workspaces: PreviewWorkspaceSupport | undefined;
@@ -125,6 +126,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
   constructor(options: DockerPreviewRuntimeOptions = {}) {
     this.docker = options.docker ?? new Docker();
     this.image = options.image ?? resolvePreviewImage();
+    this.imageVersion = previewImageVersion(this.image);
     this.cliNames = options.cliNames ?? ['docker'];
     this.log = options.log ?? (() => {});
     this.workspaces = options.workspaces;
@@ -157,7 +159,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
 
     const container = await this.createContainer(courseRoot, onProgress);
     try {
-      onProgress?.({ phase: 'startingContainer' });
+      onProgress?.({ phase: 'startingContainer', imageVersion: this.imageVersion });
       await container.start();
       this.streamLogs(container);
       const inspect = await container.inspect();
@@ -239,7 +241,14 @@ export class DockerPreviewRuntime implements PreviewRuntime {
             detail = status;
           }
           const { percent, layersDone, layersTotal } = aggregate.add(pullEvent);
-          onProgress?.({ phase: 'pullingImage', percent, layersDone, layersTotal, detail });
+          onProgress?.({
+            phase: 'pullingImage',
+            percent,
+            layersDone,
+            layersTotal,
+            detail,
+            imageVersion: this.imageVersion,
+          });
         },
       );
     });
@@ -257,6 +266,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
         phase: 'waitingForServer',
         elapsedMs: attempt * READINESS_INTERVAL_MS,
         timeoutMs,
+        imageVersion: this.imageVersion,
       });
       if (await probe(origin)) {
         return;

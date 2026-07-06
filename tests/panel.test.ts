@@ -130,21 +130,22 @@ describe('startingPanelHtml', () => {
     assert.match(html, /default-src 'none'/i);
   });
 
-  it('renders the three-phase stepper with the image download active during a pull', () => {
+  it('renders the three-phase stepper with the preview image pull active', () => {
     const html = startingPanelHtml({
       phase: 'pullingImage',
       percent: 42,
       layersDone: 2,
       layersTotal: 5,
       detail: 'Pull complete 6332824b21e0',
+      imageVersion: 'sha-1c3e05a',
     });
 
-    assert.match(html, /Downloading image/);
-    assert.match(html, /Starting container/);
+    assert.match(html, /Pulling preview image/);
+    assert.match(html, /Starting preview container/);
     assert.match(html, /Launching preview server/);
-    // The download step is active with its layer-count note and a spinning marker.
+    // The pull step is active with its layer-count note and a spinning marker.
     assert.match(html, /id="step-0" data-status="active"/);
-    assert.match(html, /2\/5 layers/);
+    assert.match(html, /sha-1c3e05a · 2\/5 layers/);
     assert.match(html, /@keyframes pl-spin/);
     // The latest raw Docker status line is surfaced under the stepper.
     assert.match(html, /id="detail"[^>]*>Pull complete 6332824b21e0</);

@@ -166,7 +166,7 @@ export function startingPanelHtml(progress?: PreviewStartupProgress): string {
   const nonce = scriptNonce();
   const stepsHtml = view.steps
     .map((step, index) => {
-      // The raw Docker status line lives under the download step (index 0), the only
+      // The raw Docker status line lives under the pull step (index 0), the only
       // phase it describes; it stays in the DOM (updated in place) but hides when empty.
       const detail =
         index === 0 ? `<span class="detail" id="detail">${escapeHtml(view.detail ?? '')}</span>` : '';
@@ -253,7 +253,7 @@ export function startingPanelHtml(progress?: PreviewStartupProgress): string {
           border-color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
         }
       }
-      /* The latest raw Docker status line, tucked under the "Downloading image" row and
+      /* The latest raw Docker status line, tucked under the "Pulling preview image" row and
          indented to line up with the step's label (past the icon). Hidden when empty. */
       .steps .detail {
         flex-basis: 100%;
