@@ -4,6 +4,19 @@ All notable changes to PrairieLearn Preview will be documented in this file.
 
 ## Unreleased
 
+## 1.2.0 - 2026-07-06
+
+- Support workspace question previews on Windows with Docker Desktop by storing
+  workspace homes in a daemon-managed named volume, mounting the daemon's in-VM
+  socket, and falling back to no-workspace previews when the Docker Engine is too
+  old for per-workspace volume subpaths.
+- Report the specific reason workspace support is disabled, such as an untrusted
+  workspace, a non-local runtime endpoint, the `plPreview.enableWorkspaces`
+  setting, or an unsupported Docker Engine version.
+- Update the pinned preview-server image to `sha-bfbe099`.
+- Keep the preview image version and layer-count note aligned on the startup
+  pull step while the first-use image download is in progress.
+
 ## 1.1.0 - 2026-07-06
 
 - Fix workspace questions failing with "Docker is not reachable: connect EACCES
