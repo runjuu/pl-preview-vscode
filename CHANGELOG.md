@@ -4,6 +4,8 @@ All notable changes to PrairieLearn Preview will be documented in this file.
 
 ## Unreleased
 
+## 1.1.0 - 2026-07-06
+
 - Fix workspace questions failing with "Docker is not reachable: connect EACCES
   /var/run/docker.sock" on macOS/Windows. Docker Desktop re-presents the mounted
   runtime socket as `root:root` inside the container, so the hardened non-root
