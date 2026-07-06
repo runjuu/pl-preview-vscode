@@ -195,7 +195,7 @@ export function startingPanelHtml(progress?: PreviewStartupProgress): string {
         list-style: none;
         padding: 0;
         margin: 1.25rem auto 0;
-        max-width: 20rem;
+        max-width: 24rem;
         text-align: left;
       }
       .steps li {
@@ -239,9 +239,16 @@ export function startingPanelHtml(progress?: PreviewStartupProgress): string {
         font-size: 0.85rem;
         color: var(--vscode-charts-green, var(--vscode-foreground));
       }
+      .steps .label {
+        flex: 1 1 0;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
       .steps .note {
-        margin-left: auto;
-        padding-left: 1rem;
+        flex: none;
+        white-space: nowrap;
         opacity: 0.7;
         font-variant-numeric: tabular-nums;
       }
