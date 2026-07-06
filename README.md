@@ -47,8 +47,8 @@ questions.
   it.
 - Keep the same variant seed across refreshes so edits are easy to compare.
 - Reroll the current question with **New variant**.
-- Preview **workspace questions** — open the live workspace container in its own
-  VS Code tab (in a trusted workspace; see [Workspace questions](#workspace-questions)).
+- Use Docker, Podman, or a compatible local container runtime.
+- Preview **workspace questions** without leaving VS Code.
 - Show render and container logs from the **PL Preview** Output channel.
 - Keep preview servers warm for recently used courses, with a command to stop
   them when you are done.
@@ -65,11 +65,14 @@ questions.
 
 ## Install
 
-Install **PL Preview** from the VS Code Marketplace:
+Install **PL Preview** from your editor's extension registry:
 
-1. Open the Extensions view in VS Code.
-2. Search for `runjuu.pl-preview-vscode`.
-3. Select **Install**.
+- **VS Code Marketplace:** search for `runjuu.pl-preview-vscode` in the
+  Extensions view, or open the
+  [Marketplace listing](https://marketplace.visualstudio.com/items?itemName=runjuu.pl-preview-vscode).
+- **Open VSX:** install
+  [`runjuu.pl-preview-vscode`](https://open-vsx.org/extension/runjuu/pl-preview-vscode)
+  in VSCodium or another Open VSX-compatible editor.
 
 PL Preview activates when your workspace contains a PrairieLearn
 `infoCourse.json` file.
@@ -82,8 +85,9 @@ PL Preview activates when your workspace contains a PrairieLearn
 3. Click the preview button in the editor title bar.
 4. Keep editing your question source. Save the file to refresh the preview.
 
-The preview opens beside your editor and follows the active PrairieLearn question
-as you switch files.
+The preview opens beside your editor, follows the active PrairieLearn question as
+you switch files, and shows clear progress while the local preview environment
+starts.
 
 ## Commands
 
@@ -115,6 +119,9 @@ To choose a runtime explicitly, set these in VS Code settings:
 When multiple runtimes are running and `auto` is selected, Docker is preferred;
 set `plPreview.containerRuntime` to `podman` to force Podman.
 
+If the selected runtime is installed but stopped, PL Preview can help start it
+before opening the preview.
+
 **Podman on macOS/Windows.** Podman runs inside a `podman machine` VM whose socket
 path is not reliably discoverable. Either run `podman-mac-helper install` (so the
 default Docker socket points at Podman and `auto` just works), export
@@ -129,7 +136,9 @@ in the browser, JupyterLab, and so on). To preview one, the preview server must 
 able to launch that container itself, so PL Preview mounts the container runtime
 socket into the preview container and connects both to a shared per-course network.
 Everything is proxied through the preview server, so the live workspace opens in a
-separate VS Code tab — click **Open workspace** on a workspace question.
+separate VS Code tab beside the preview — click **Open workspace** on a workspace
+question. From there, you can see the workspace status and reboot or reset the
+workspace when you need a fresh run.
 
 Because this lets previewed course code talk to your container runtime (which is
 root-equivalent with a rootful daemon), it is enabled only when **both** hold:
