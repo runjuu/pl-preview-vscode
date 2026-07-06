@@ -660,7 +660,7 @@ function buildRuntime(candidate: RuntimeCandidate): void {
   }
   selectedProfile = candidate.profile;
   selectedEndpoint = candidate.endpoint;
-  const workspaces = computeWorkspaceSupport(candidate.endpoint);
+  const { support: workspaces, disabledReason } = computeWorkspaceSupport(candidate.endpoint);
   // First-use pull and readiness progress surface in the panel's live "Starting
   // preview…" overview (via the controller's onProgress), so the runtime only
   // needs the Output-channel log sink here.
@@ -675,7 +675,7 @@ function buildRuntime(candidate: RuntimeCandidate): void {
   );
   getOutput().appendLine(
     workspaces == null
-      ? '[pl-preview] workspace questions disabled (needs a trusted workspace on a socket runtime)'
+      ? `[pl-preview] workspace questions disabled: ${disabledReason}`
       : '[pl-preview] workspace questions enabled for this trusted workspace',
   );
 }
@@ -686,19 +686,51 @@ function buildRuntime(candidate: RuntimeCandidate): void {
  * equivalent with a rootful daemon), so it is gated on an explicitly trusted
  * workspace and a socket endpoint we can actually bind-mount (podman-machine /
  * remote tcp/ssh endpoints have no local socket).
+ *
+ * Excluded on Windows: the feature relies on bind-mounting the workspace home
+ * dir at an *identical* host/container path (so the sibling workspace containers
+ * can bind the same host paths) and on mounting the runtime socket. Neither
+ * translates to Docker Desktop for Windows — a `C:\…` host path is not a valid
+ * Linux container mount point (its drive-letter colon also breaks Docker's
+ * `source:dest:mode` bind parsing, failing the whole container launch), and the
+ * endpoint is a named pipe rather than a bind-mountable Unix socket. So we leave
+ * workspaces disabled there; ordinary questions render normally and workspace
+ * questions show the built-in "disabled" page instead of breaking every preview.
+ *
+ * Returns the support config when enabled, or a short human `disabledReason`
+ * naming the specific gate that failed — the Output channel echoes it verbatim,
+ * so it must read well after "workspace questions disabled: ".
  */
-function computeWorkspaceSupport(endpoint: RuntimeEndpoint): PreviewWorkspaceSupport | undefined {
-  if (!vscode.workspace.isTrusted || endpoint.kind !== 'socket') {
-    return undefined;
+function computeWorkspaceSupport(endpoint: RuntimeEndpoint): WorkspaceSupportDecision {
+  if (!vscode.workspace.isTrusted) {
+    return { disabledReason: 'this workspace is not trusted' };
+  }
+  if (endpoint.kind !== 'socket') {
+    return { disabledReason: 'the container runtime is not reachable over a local socket' };
+  }
+  if (process.platform === 'win32') {
+    return { disabledReason: 'not supported on Windows (Docker Desktop bind-mount limits)' };
   }
   if (!vscode.workspace.getConfiguration('plPreview').get<boolean>('enableWorkspaces', true)) {
-    return undefined;
+    return { disabledReason: 'turned off via the plPreview.enableWorkspaces setting' };
   }
   return {
-    dockerSocketPath: endpoint.socketPath,
-    homeRoot: path.join(os.tmpdir(), 'pl-preview-vscode-workspaces'),
-    socketGid: socketGroupId(endpoint.socketPath),
+    support: {
+      dockerSocketPath: endpoint.socketPath,
+      homeRoot: path.join(os.tmpdir(), 'pl-preview-vscode-workspaces'),
+      socketGid: socketGroupId(endpoint.socketPath),
+    },
   };
+}
+
+/**
+ * Outcome of {@link computeWorkspaceSupport}: exactly one field is set — `support`
+ * when workspace questions are enabled this session, or `disabledReason` (a short
+ * human phrase for the Output channel) when they are not.
+ */
+interface WorkspaceSupportDecision {
+  readonly support?: PreviewWorkspaceSupport;
+  readonly disabledReason?: string;
 }
 
 /**
