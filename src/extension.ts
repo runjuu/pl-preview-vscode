@@ -8,8 +8,14 @@ import path from 'node:path';
 import Docker from 'dockerode';
 import * as vscode from 'vscode';
 
+import {
+  type RemovablePreviewImage,
+  formatBytes,
+  resolvePreviewImage,
+} from './containerSpec';
 import { DockerPreviewRuntime, type PreviewWorkspaceSupport } from './dockerRuntime';
 import {
+  DELETE_OLD_IMAGES_COMMAND,
   NEW_VARIANT_COMMAND,
   OPEN_PREVIEW_COMMAND,
   PREVIEW_PANEL_TITLE,
@@ -1005,6 +1011,132 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Global-state key recording the pinned image whose cleanup we already offered. */
+const LAST_CLEANUP_IMAGE_KEY = 'plPreview.lastCleanupPromptedImage';
+
+/**
+ * "Delete old preview images": remove every preview image superseded by an update
+ * (all of the current image's repo except the pinned one). Resolves a runtime first
+ * — reusing the guided install/start remediation — so it works even before any
+ * preview has been opened this session.
+ */
+async function deleteOldImages(): Promise<void> {
+  if (!(await ensureRuntimeReady())) {
+    return;
+  }
+
+  let images: RemovablePreviewImage[];
+  try {
+    images = await getRuntime().listRemovablePreviewImages();
+  } catch (error) {
+    getOutput().appendLine(`[pl-preview] could not list preview images: ${formatError(error)}`);
+    void vscode.window
+      .showErrorMessage('PrairieLearn Preview: Could not list preview images.', 'Show logs')
+      .then((choice) => {
+        if (choice === 'Show logs') getOutput().show(true);
+      });
+    return;
+  }
+
+  if (images.length === 0) {
+    void vscode.window.showInformationMessage('PrairieLearn Preview: No old preview images to remove.');
+    return;
+  }
+
+  await confirmAndRemoveImages(images);
+}
+
+/**
+ * Confirm the itemized deletion in one modal, then remove each image behind a
+ * progress notification — tallying reclaimed space and reporting any image still
+ * bound to a running container as skipped rather than force-removing it out from
+ * under a live preview. Shared by the command and the update auto-prompt.
+ */
+async function confirmAndRemoveImages(images: readonly RemovablePreviewImage[]): Promise<void> {
+  const total = images.reduce((sum, image) => sum + image.size, 0);
+  const list = images.map((image) => `  • ${image.name}  ${formatBytes(image.size)}`).join('\n');
+  const choice = await vscode.window.showWarningMessage(
+    `Delete ${images.length} old preview image${images.length === 1 ? '' : 's'}?`,
+    {
+      modal: true,
+      detail: `These superseded PrairieLearn images will be removed (reclaims ~${formatBytes(total)}):\n${list}`,
+    },
+    'Delete',
+  );
+  if (choice !== 'Delete') {
+    return;
+  }
+
+  const skipped: RemovablePreviewImage[] = [];
+  let reclaimed = 0;
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: 'PrairieLearn Preview: Removing old preview images…',
+    },
+    async () => {
+      for (const image of images) {
+        try {
+          await getRuntime().removePreviewImage(image.id);
+          reclaimed += image.size;
+          getOutput().appendLine(`[pl-preview] removed image ${image.name} (${formatBytes(image.size)})`);
+        } catch (error) {
+          skipped.push(image);
+          getOutput().appendLine(`[pl-preview] could not remove image ${image.name}: ${formatError(error)}`);
+        }
+      }
+    },
+  );
+
+  const removed = images.length - skipped.length;
+  const summary =
+    `PrairieLearn Preview: Removed ${removed} image${removed === 1 ? '' : 's'} (reclaimed ~${formatBytes(reclaimed)}).` +
+    (skipped.length > 0 ? ` ${skipped.length} still in use — skipped.` : '');
+  void vscode.window.showInformationMessage(summary);
+}
+
+/**
+ * After an update swaps the pinned image, offer to delete the one it replaced —
+ * at most once per version. Strictly best-effort: it never launches Docker just to
+ * check (it binds only a runtime that already answers), and it leaves the marker
+ * unset when the daemon is unreachable so a later activation retries. Once it has
+ * actually looked, the marker advances regardless of the choice, so a dismissal is
+ * respected until the next update.
+ */
+async function maybeOfferImageCleanup(context: vscode.ExtensionContext): Promise<void> {
+  try {
+    const current = resolvePreviewImage();
+    if (context.globalState.get<string>(LAST_CLEANUP_IMAGE_KEY) === current) {
+      return;
+    }
+
+    // Silent probe: bind a runtime only if one is already reachable — no remediation
+    // UI, no launching Docker. Nothing up yet? Retry on a later activation.
+    const selection = await resolveRuntimeSelection(readRuntimeConfig(), endpointContext(), probeCandidate);
+    if (selection.kind !== 'available') {
+      return;
+    }
+    buildRuntime(selection.candidate);
+
+    const images = await getRuntime().listRemovablePreviewImages();
+    await context.globalState.update(LAST_CLEANUP_IMAGE_KEY, current);
+    if (images.length === 0) {
+      return;
+    }
+
+    const total = images.reduce((sum, image) => sum + image.size, 0);
+    const choice = await vscode.window.showInformationMessage(
+      `PrairieLearn Preview: ${images.length} old preview image${images.length === 1 ? '' : 's'} can be removed (~${formatBytes(total)}).`,
+      'Delete',
+    );
+    if (choice === 'Delete') {
+      await confirmAndRemoveImages(images);
+    }
+  } catch (error) {
+    getOutput().appendLine(`[pl-preview] image-cleanup check skipped: ${formatError(error)}`);
+  }
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(OPEN_PREVIEW_COMMAND, () => openPreview(context)),
@@ -1014,6 +1146,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(SHOW_LOGS_COMMAND, () => getOutput().show(true)),
     // "Stop preview servers": stop every warm container to reclaim resources.
     vscode.commands.registerCommand(STOP_SERVERS_COMMAND, () => controller?.stopServers()),
+    // "Delete old preview images": reclaim the disk left by superseded image pins.
+    vscode.commands.registerCommand(DELETE_OLD_IMAGES_COMMAND, () => deleteOldImages()),
     // Rebind the runtime when the author changes the runtime/endpoint settings, so
     // the next preview resolves against the new selection (and warm containers on
     // the old runtime are stopped).
@@ -1034,6 +1168,10 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   watchPreviewability(context);
+
+  // A new extension release pins a new image; offer to reclaim the one it replaced
+  // (best-effort, at most once per version, and only if a runtime is already up).
+  void maybeOfferImageCleanup(context);
 }
 
 /**

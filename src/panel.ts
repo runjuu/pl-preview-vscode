@@ -24,6 +24,9 @@ export const SHOW_LOGS_COMMAND = 'plPreview.showLogs';
 /** Command id that stops every running preview container to reclaim resources. */
 export const STOP_SERVERS_COMMAND = 'plPreview.stopServers';
 
+/** Command id that deletes preview images superseded by an extension update. */
+export const DELETE_OLD_IMAGES_COMMAND = 'plPreview.deleteOldImages';
+
 /** Stable view type used when creating the webview panel. */
 export const PREVIEW_VIEW_TYPE = 'plPreview.panel';
 

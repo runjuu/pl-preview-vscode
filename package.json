@@ -76,6 +76,11 @@
         "command": "plPreview.stopServers",
         "title": "Stop preview servers",
         "category": "PrairieLearn Preview"
+      },
+      {
+        "command": "plPreview.deleteOldImages",
+        "title": "Delete old preview images",
+        "category": "PrairieLearn Preview"
       }
     ],
     "menus": {

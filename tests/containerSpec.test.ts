@@ -8,9 +8,13 @@ import {
   PREVIEW_DOCKER_SOCKET_MOUNT,
   PREVIEW_LABEL,
   PREVIEW_SERVER_ENTRYPOINT,
+  type PreviewImageInfo,
   buildPreviewContainerCreateOptions,
+  formatBytes,
+  parseImageReference,
   resolvePreviewImage,
   resolvePublishedPort,
+  selectRemovablePreviewImages,
 } from '../src/containerSpec';
 
 const courseRoot = '/Users/author/my-course';
@@ -219,3 +223,150 @@ function adjacent(list: string[], value: string, next: string): boolean {
   const index = list.indexOf(value);
   return index >= 0 && list[index + 1] === next;
 }
+
+describe('parseImageReference', () => {
+  it('splits repo, tag, and digest from a fully-pinned reference', () => {
+    const parsed = parseImageReference('ghcr.io/runjuu/prairielearn:sha-1c3e05a@sha256:abc');
+    assert.equal(parsed.repo, 'ghcr.io/runjuu/prairielearn');
+    assert.equal(parsed.tag, 'sha-1c3e05a');
+    assert.equal(parsed.digest, 'sha256:abc');
+  });
+
+  it('reads a digest-only reference (no tag)', () => {
+    const parsed = parseImageReference('ghcr.io/runjuu/prairielearn@sha256:abc');
+    assert.equal(parsed.repo, 'ghcr.io/runjuu/prairielearn');
+    assert.equal(parsed.tag, undefined);
+    assert.equal(parsed.digest, 'sha256:abc');
+  });
+
+  it('reads a tag-only reference (no digest)', () => {
+    const parsed = parseImageReference('my/local-pl:dev');
+    assert.equal(parsed.repo, 'my/local-pl');
+    assert.equal(parsed.tag, 'dev');
+    assert.equal(parsed.digest, undefined);
+  });
+
+  it('does not mistake a registry port for a tag', () => {
+    const withTag = parseImageReference('localhost:5000/pl:dev');
+    assert.equal(withTag.repo, 'localhost:5000/pl');
+    assert.equal(withTag.tag, 'dev');
+
+    const bare = parseImageReference('localhost:5000/pl');
+    assert.equal(bare.repo, 'localhost:5000/pl');
+    assert.equal(bare.tag, undefined);
+  });
+});
+
+describe('selectRemovablePreviewImages', () => {
+  const current = parseImageReference(DEFAULT_PREVIEW_IMAGE);
+  const REPO = current.repo;
+
+  const currentImage: PreviewImageInfo = {
+    Id: 'sha256:current',
+    RepoTags: [`${REPO}:${current.tag}`],
+    RepoDigests: [`${REPO}@${current.digest}`],
+    Size: 2_100_000_000,
+  };
+  const oldTagged: PreviewImageInfo = {
+    Id: 'sha256:old1',
+    RepoTags: [`${REPO}:sha-0af9b21`],
+    RepoDigests: [`${REPO}@sha256:0af9`],
+    Size: 2_050_000_000,
+  };
+  const oldDigestOnly: PreviewImageInfo = {
+    Id: 'sha256:old2',
+    RepoTags: ['<none>:<none>'],
+    RepoDigests: [`${REPO}@sha256:1111abcdef2222deadbeef`],
+    Size: 2_000_000_000,
+  };
+  const unrelated: PreviewImageInfo = {
+    Id: 'sha256:node',
+    RepoTags: ['node:20'],
+    RepoDigests: ['node@sha256:cafe'],
+    Size: 900_000_000,
+  };
+
+  it('keeps the current image and ignores every unrelated repo', () => {
+    const removable = selectRemovablePreviewImages([currentImage, unrelated], DEFAULT_PREVIEW_IMAGE);
+    assert.deepEqual(removable, []);
+  });
+
+  it('selects old preview images of the same repo, labelled by tag or short digest', () => {
+    const removable = selectRemovablePreviewImages(
+      [currentImage, oldTagged, oldDigestOnly, unrelated],
+      DEFAULT_PREVIEW_IMAGE,
+    );
+
+    assert.deepEqual(
+      removable.map((image) => image.id),
+      ['sha256:old1', 'sha256:old2'],
+    );
+    assert.equal(removable[0].name, 'sha-0af9b21', 'prefers the git-sha tag');
+    assert.equal(removable[1].name, '1111abcdef22', 'falls back to the short repo digest');
+    assert.equal(removable[0].size, 2_050_000_000);
+  });
+
+  it('excludes the current image when matched only by digest (its tag moved away)', () => {
+    const digestOnlyCurrent: PreviewImageInfo = {
+      Id: 'sha256:current',
+      RepoTags: null,
+      RepoDigests: [`${REPO}@${current.digest}`],
+      Size: 2_100_000_000,
+    };
+    const removable = selectRemovablePreviewImages([digestOnlyCurrent, oldTagged], DEFAULT_PREVIEW_IMAGE);
+    assert.deepEqual(
+      removable.map((image) => image.id),
+      ['sha256:old1'],
+    );
+  });
+
+  it('excludes the current image even when it carries extra tags', () => {
+    const multiTagged: PreviewImageInfo = {
+      Id: 'sha256:current',
+      RepoTags: [`${REPO}:${current.tag}`, `${REPO}:latest`],
+      RepoDigests: [`${REPO}@${current.digest}`],
+      Size: 2_100_000_000,
+    };
+    assert.deepEqual(selectRemovablePreviewImages([multiTagged], DEFAULT_PREVIEW_IMAGE), []);
+  });
+
+  it('honours a PL_PREVIEW_IMAGE override pointing at another repo', () => {
+    const localCurrent: PreviewImageInfo = {
+      Id: 'sha256:localcur',
+      RepoTags: ['my/local-pl:dev'],
+      RepoDigests: [],
+      Size: 1_000,
+    };
+    const localOld: PreviewImageInfo = {
+      Id: 'sha256:localold',
+      RepoTags: ['my/local-pl:old'],
+      RepoDigests: [],
+      Size: 2_000,
+    };
+    const removable = selectRemovablePreviewImages(
+      [localCurrent, localOld, currentImage, oldTagged],
+      'my/local-pl:dev',
+    );
+    // Only the override repo is touched; the ghcr images are ignored entirely.
+    assert.deepEqual(
+      removable.map((image) => image.id),
+      ['sha256:localold'],
+    );
+  });
+});
+
+describe('formatBytes', () => {
+  it('scales bytes into B/KB/MB/GB, one decimal above bytes', () => {
+    assert.equal(formatBytes(0), '0 B');
+    assert.equal(formatBytes(512), '512 B');
+    assert.equal(formatBytes(1024), '1 KB');
+    assert.equal(formatBytes(1536), '1.5 KB');
+    assert.equal(formatBytes(1024 * 1024), '1 MB');
+    assert.equal(formatBytes(2.1 * 1024 * 1024 * 1024), '2.1 GB');
+  });
+
+  it('treats a non-positive or non-finite size as zero', () => {
+    assert.equal(formatBytes(-5), '0 B');
+    assert.equal(formatBytes(Number.NaN), '0 B');
+  });
+});

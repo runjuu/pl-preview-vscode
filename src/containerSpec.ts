@@ -119,6 +119,146 @@ export function resolvePreviewImage(
   return override ? override : DEFAULT_PREVIEW_IMAGE;
 }
 
+/** The parts of a Docker image reference `registry/repo[:tag][@digest]`. */
+export interface ParsedImageReference {
+  /** Registry + repository path, e.g. `ghcr.io/runjuu/prairielearn`. */
+  readonly repo: string;
+  /** The `:tag`, if the reference carries one. */
+  readonly tag?: string;
+  /** The `@sha256:…` content digest, if the reference carries one. */
+  readonly digest?: string;
+}
+
+/**
+ * Split an image reference into repo / tag / digest. The tag colon lives only in
+ * the last path segment, so a registry port (`host:5000/repo`) is not mistaken for
+ * a tag; the digest is whatever follows `@`.
+ */
+export function parseImageReference(reference: string): ParsedImageReference {
+  const at = reference.indexOf('@');
+  const digest = at >= 0 ? reference.slice(at + 1) : undefined;
+  const nameAndTag = at >= 0 ? reference.slice(0, at) : reference;
+
+  const lastSlash = nameAndTag.lastIndexOf('/');
+  const lastColon = nameAndTag.lastIndexOf(':');
+  if (lastColon > lastSlash) {
+    return { repo: nameAndTag.slice(0, lastColon), tag: nameAndTag.slice(lastColon + 1), digest };
+  }
+  return { repo: nameAndTag, digest };
+}
+
+/**
+ * The subset of a dockerode image-summary (`Docker.ImageInfo`) the preview cleanup
+ * reads. Kept as a local shape so the selection logic stays free of dockerode and
+ * unit-testable, mirroring {@link PreviewContainerInspect}.
+ */
+export interface PreviewImageInfo {
+  readonly Id: string;
+  readonly RepoTags?: readonly string[] | null;
+  readonly RepoDigests?: readonly string[] | null;
+  readonly Size: number;
+  readonly Created?: number;
+}
+
+/** A superseded preview image the user can reclaim disk space by removing. */
+export interface RemovablePreviewImage {
+  /** Image id (`sha256:…`) to remove. */
+  readonly id: string;
+  /** Friendly label for the confirm prompt: the git-sha tag, else a short digest. */
+  readonly name: string;
+  /** On-disk size in bytes (dockerode's shared-layer-unaware `Size`). */
+  readonly size: number;
+  /** Unix seconds the image was created, when reported. */
+  readonly created?: number;
+}
+
+/** Docker uses this placeholder for an untagged image's repo/tag/digest. */
+const NONE_REF = '<none>';
+
+/**
+ * Select the preview images that are safe to delete: every image of the *current*
+ * image's repository except the current one itself. The current image is matched by
+ * its pinned digest **or** tag (dockerode groups all refs of one image under a single
+ * `Id`, so an image carrying extra tags is still recognised as current and kept).
+ * Images of any other repository (`node`, `postgres`, a `PL_PREVIEW_IMAGE` override
+ * pointing elsewhere) are ignored — this only ever prunes the preview repo.
+ */
+export function selectRemovablePreviewImages(
+  images: readonly PreviewImageInfo[],
+  currentReference: string,
+): RemovablePreviewImage[] {
+  const current = parseImageReference(currentReference);
+  const removable: RemovablePreviewImage[] = [];
+
+  for (const image of images) {
+    const tags = (image.RepoTags ?? []).filter((ref) => ref && !ref.startsWith(NONE_REF));
+    const digests = (image.RepoDigests ?? []).filter((ref) => ref && !ref.startsWith(NONE_REF));
+
+    // Only touch images of the current preview repository.
+    const repoTags = tags.filter((ref) => parseImageReference(ref).repo === current.repo);
+    const repoDigests = digests.filter((ref) => parseImageReference(ref).repo === current.repo);
+    if (repoTags.length === 0 && repoDigests.length === 0) {
+      continue;
+    }
+
+    // Never remove the image the extension is currently pinned to.
+    const isCurrent =
+      (current.digest != null && repoDigests.includes(`${current.repo}@${current.digest}`)) ||
+      (current.tag != null && repoTags.includes(`${current.repo}:${current.tag}`));
+    if (isCurrent) {
+      continue;
+    }
+
+    removable.push({
+      id: image.Id,
+      name: friendlyImageName(repoTags, repoDigests, image.Id),
+      size: image.Size,
+      created: image.Created,
+    });
+  }
+
+  return removable;
+}
+
+/** Prefer a git-sha tag, then a short repo digest, then the image id, for display. */
+function friendlyImageName(
+  repoTags: readonly string[],
+  repoDigests: readonly string[],
+  id: string,
+): string {
+  for (const ref of repoTags) {
+    const { tag } = parseImageReference(ref);
+    if (tag) return tag;
+  }
+  for (const ref of repoDigests) {
+    const { digest } = parseImageReference(ref);
+    if (digest) return shortDigest(digest);
+  }
+  return shortDigest(id);
+}
+
+/** `sha256:fe84085f5db6…` → `fe84085f5db6` (first 12 hex chars). */
+function shortDigest(digest: string): string {
+  return digest.replace(/^sha256:/, '').slice(0, 12);
+}
+
+/** Render a byte count as a compact `2.1 GB` / `512 MB` / `0 B` label. */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return '0 B';
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  // Bytes stay whole; larger units carry one decimal (dropping a trailing `.0`).
+  const rounded = unit === 0 ? value : Number(value.toFixed(1));
+  return `${rounded} ${units[unit]}`;
+}
+
 /**
  * Build the dockerode create options for a course's Local Preview Container.
  *

@@ -9,9 +9,12 @@ import {
   PREVIEW_WORKSPACE_HOME_ROOT_LABEL,
   buildPreviewContainerCreateOptions,
   type PreviewContainerInspect,
+  type PreviewImageInfo,
   type PreviewWorkspaceContainerConfig,
+  type RemovablePreviewImage,
   resolvePreviewImage,
   resolvePublishedPort,
+  selectRemovablePreviewImages,
 } from './containerSpec';
 import {
   type DockerPullEvent,
@@ -60,6 +63,14 @@ export interface PreviewRuntime {
   stop(courseRoot: string): Promise<void>;
   /** Stop every container this runtime started. */
   stopAll(): Promise<void>;
+  /**
+   * List the superseded preview images on the daemon — every image of the current
+   * image's repository except the pinned one — so the shell can offer to reclaim the
+   * disk each obsolete extension release left behind.
+   */
+  listRemovablePreviewImages(): Promise<RemovablePreviewImage[]>;
+  /** Remove a single image by id; the caller handles a still-in-use failure per image. */
+  removePreviewImage(id: string): Promise<void>;
 }
 
 export interface DockerPreviewRuntimeOptions {
@@ -190,6 +201,17 @@ export class DockerPreviewRuntime implements PreviewRuntime {
     this.running.clear();
     await Promise.all(containers.map(({ container }) => this.gracefulRemove(container)));
     await Promise.all(courseRoots.map((courseRoot) => this.cleanupWorkspaceSupport(courseRoot)));
+  }
+
+  async listRemovablePreviewImages(): Promise<RemovablePreviewImage[]> {
+    const images = (await this.docker.listImages()) as unknown as PreviewImageInfo[];
+    return selectRemovablePreviewImages(images, this.image);
+  }
+
+  async removePreviewImage(id: string): Promise<void> {
+    // `force` clears an image that still carries multiple tags; an image bound to a
+    // running container throws a 409, which the caller surfaces as "skipped".
+    await this.docker.getImage(id).remove({ force: true });
   }
 
   /**
