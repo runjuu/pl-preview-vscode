@@ -34,6 +34,15 @@ export const PREVIEW_SERVER_ENTRYPOINT =
 export const PREVIEW_COURSE_MOUNT = '/course';
 
 /**
+ * Path the workspace-home volume is bind-mounted at inside the preview
+ * container. The preview server populates each workspace's home dir under this
+ * root; the sibling workspace containers mount the matching subpath of the same
+ * named volume, so the path only needs to be a stable Linux mount point (not an
+ * identical host path as in the legacy host-dir bind).
+ */
+export const PREVIEW_WORKSPACE_HOME_MOUNT = '/pl-workspaces';
+
+/**
  * Path the host container-runtime socket is bind-mounted at inside the
  * container when workspace support is enabled. The in-container preview server
  * launches workspace containers through the ambient Docker client, which
@@ -79,11 +88,12 @@ export interface PreviewWorkspaceContainerConfig {
   /** Shared user-defined network the preview and workspace containers join. */
   network: string;
   /**
-   * Writable host directory that holds workspace home dirs. Bind-mounted at the
-   * identical path so the sibling workspace containers (created on the host
-   * daemon) can bind the same paths.
+   * Daemon-managed named volume that holds the workspace home dirs. Bind-mounted
+   * into the preview container at {@link PREVIEW_WORKSPACE_HOME_MOUNT}; the
+   * sibling workspace containers (created on the same daemon) mount the matching
+   * subpath of this same volume, so no host directory is shared.
    */
-  homeDir: string;
+  homeVolume: string;
   /**
    * Supplementary group gid granting the non-root container user socket access:
    * the socket's real group on native Linux, or group 0 on VM-backed runtimes
@@ -311,12 +321,12 @@ export function buildPreviewContainerCreateOptions(
     // render a clear "disabled" page instead of failing to launch a container.
     cmd.push('--no-workspaces');
   } else {
-    // Mount the host runtime socket so the server can launch workspace
-    // containers as siblings, join them on a shared network so it can reach
-    // them by alias, and expose a writable, identically-pathed home root it can
-    // populate for them (sibling containers bind the same host paths).
+    // Mount the runtime socket so the server can launch workspace containers as
+    // siblings, join them on a shared network so it can reach them by alias, and
+    // mount a daemon-managed named volume it populates with their home dirs (the
+    // sibling containers mount matching subpaths of the same named volume).
     binds.push(`${workspaces.dockerSocketPath}:${PREVIEW_DOCKER_SOCKET_MOUNT}`);
-    binds.push(`${workspaces.homeDir}:${workspaces.homeDir}`);
+    binds.push(`${workspaces.homeVolume}:${PREVIEW_WORKSPACE_HOME_MOUNT}`);
     hostConfig.NetworkMode = workspaces.network;
     if (workspaces.socketGid != null) {
       // The non-root container user needs the socket's group to open it.
@@ -324,7 +334,9 @@ export function buildPreviewContainerCreateOptions(
     }
     cmd.push(
       '--workspace-home-dir',
-      workspaces.homeDir,
+      PREVIEW_WORKSPACE_HOME_MOUNT,
+      '--workspace-home-volume',
+      workspaces.homeVolume,
       '--workspace-network',
       workspaces.network,
     );

@@ -1,11 +1,12 @@
-import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 
 import Docker from 'dockerode';
 
 import {
+  PREVIEW_LABEL,
   PREVIEW_WORKSPACE_CONTAINER_LABEL,
+  PREVIEW_WORKSPACE_HOME_MOUNT,
   PREVIEW_WORKSPACE_HOME_ROOT_LABEL,
   buildPreviewContainerCreateOptions,
   type PreviewContainerInspect,
@@ -89,8 +90,8 @@ export interface DockerPreviewRuntimeOptions {
   /**
    * When set, preview containers are granted workspace-question support: the
    * runtime socket is mounted, a per-course shared network is created, and a
-   * per-course writable home dir under {@link PreviewWorkspaceSupport.homeRoot}
-   * is bind-mounted. Absent when the workspace is untrusted or the resolved
+   * per-course daemon-managed named volume is created and mounted to hold the
+   * workspace home dirs. Absent when the workspace is untrusted or the resolved
    * endpoint is not socket-based.
    */
   workspaces?: PreviewWorkspaceSupport;
@@ -100,8 +101,6 @@ export interface DockerPreviewRuntimeOptions {
 export interface PreviewWorkspaceSupport {
   /** Host path of the runtime socket, bind-mounted so the server can launch containers. */
   dockerSocketPath: string;
-  /** Base host dir under which per-course writable workspace home roots are created. */
-  homeRoot: string;
   /**
    * Supplementary gid the non-root container user joins to open the mounted
    * socket: the socket's real group on native Linux, or group 0 on VM-backed
@@ -133,6 +132,12 @@ export class DockerPreviewRuntime implements PreviewRuntime {
   private readonly log: (line: string) => void;
   private readonly workspaces: PreviewWorkspaceSupport | undefined;
   private readonly running = new Map<string, RunningContainer>();
+  /**
+   * Cached daemon capability check: whether the Engine supports per-workspace
+   * volume subpath mounts (VolumeOptions.Subpath, API >= 1.45). Resolved lazily on
+   * first workspace launch; undefined until then.
+   */
+  private workspaceVolumesSupported: boolean | undefined;
 
   constructor(options: DockerPreviewRuntimeOptions = {}) {
     this.docker = options.docker ?? new Docker();
@@ -227,7 +232,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       image: this.image,
       courseRoot,
       courseId: previewCourseId(courseRoot),
-      workspaces: await this.prepareWorkspaceSupport(courseRoot),
+      workspaces: await this.prepareWorkspaceSupport(courseRoot, onProgress),
     });
 
     try {
@@ -343,31 +348,117 @@ export class DockerPreviewRuntime implements PreviewRuntime {
 
   /**
    * Prepare per-course workspace support: ensure the shared network and a
-   * writable home root exist, then return the container-spec config. Returns
-   * undefined when workspace support is disabled for this session.
+   * daemon-managed named volume for the workspace home dirs exist, then return
+   * the container-spec config. Returns undefined when workspace support is
+   * disabled for this session.
    */
   private async prepareWorkspaceSupport(
     courseRoot: string,
+    onProgress?: (progress: PreviewStartupProgress) => void,
   ): Promise<PreviewWorkspaceContainerConfig | undefined> {
     const support = this.workspaces;
     if (support == null) {
       return undefined;
     }
 
+    // Per-workspace isolation relies on VolumeOptions.Subpath (Engine 25.0 / API
+    // 1.45). An older daemon silently ignores the field and mounts the whole
+    // volume root into every workspace, cross-contaminating their home dirs — so
+    // degrade to no-workspaces (ordinary questions still render) instead.
+    if (!(await this.supportsWorkspaceVolumes())) {
+      this.log(
+        '[pl-preview] workspace questions disabled: Docker Engine is older than 25.0 ' +
+          '(API 1.45), required for per-workspace volume mounts',
+      );
+      return undefined;
+    }
+
     const network = previewNetworkName(previewCourseId(courseRoot));
-    const homeDir = workspaceHomeDir(support.homeRoot, courseRoot);
+    const volumeName = workspaceVolumeName(courseRoot);
     await this.ensureNetwork(network);
-    await fs.mkdir(homeDir, { recursive: true });
-    // The container runs as uid 1001, which rarely matches the host user, so
-    // make the bind-mounted home root writable regardless of ownership.
-    await fs.chmod(homeDir, 0o777);
+    // createVolume is idempotent: it returns the existing volume for a name that
+    // already exists rather than erroring, so a warm re-open just reuses it.
+    await this.docker.createVolume({ Name: volumeName, Labels: { [PREVIEW_LABEL]: 'true' } });
+    await this.chownVolumeRoot(volumeName, onProgress);
 
     return {
-      dockerSocketPath: support.dockerSocketPath,
+      // On Windows the dockerode client talks over the named pipe, but the
+      // daemon-side bind source must be the real Unix socket inside the VM.
+      dockerSocketPath: daemonSocketMountSource(support.dockerSocketPath),
       network,
-      homeDir,
+      homeVolume: volumeName,
       socketGid: support.socketGid,
     };
+  }
+
+  /**
+   * A fresh named volume's root is created `root:root` mode 0755, but the preview
+   * server runs as uid 1001 and must populate workspace home dirs under it. Run a
+   * throwaway root container that binds the volume and `chmod 0777`s its root so
+   * the non-root user can write. On a cold first run the image may not be pulled
+   * yet, so a no-such-image 404 triggers a pull-and-retry.
+   */
+  private async chownVolumeRoot(
+    volume: string,
+    onProgress?: (progress: PreviewStartupProgress) => void,
+  ): Promise<void> {
+    const options: Docker.ContainerCreateOptions = {
+      Image: this.image,
+      User: '0:0',
+      Entrypoint: ['chmod', '0777', PREVIEW_WORKSPACE_HOME_MOUNT],
+      // Label + AutoRemove so a crash between start and the finally-remove can't
+      // leak this throwaway container: the daemon reaps it on exit, and the label
+      // lets any future reconciliation find it.
+      Labels: { [PREVIEW_LABEL]: 'true' },
+      HostConfig: { Binds: [`${volume}:${PREVIEW_WORKSPACE_HOME_MOUNT}`], AutoRemove: true },
+    };
+
+    let container: Docker.Container;
+    try {
+      container = await this.docker.createContainer(options);
+    } catch (error) {
+      if (!isNoSuchImage(error)) {
+        throw error;
+      }
+      this.log(`[pl-preview] pulling ${this.image} (first use)…`);
+      await this.pullImage(onProgress);
+      container = await this.docker.createContainer(options);
+    }
+
+    try {
+      await container.start();
+      try {
+        // Block until the (near-instant) chmod finishes so the preview container
+        // never mounts the volume before its root is writable. With AutoRemove the
+        // daemon may reap the exited container before wait() resolves; that shows
+        // up as "no such container" and is benign — a start() failure is not.
+        await container.wait();
+      } catch (error) {
+        if (!isNoSuchContainer(error)) {
+          throw error;
+        }
+      }
+    } finally {
+      await this.forceRemove(container);
+    }
+  }
+
+  /**
+   * Whether the daemon supports per-workspace volume subpath mounts
+   * (VolumeOptions.Subpath, Engine 25.0 / API 1.45). Cached after the first probe;
+   * a daemon that won't report a version is treated as unsupported so we degrade
+   * safely rather than risk a silent whole-volume mount.
+   */
+  private async supportsWorkspaceVolumes(): Promise<boolean> {
+    if (this.workspaceVolumesSupported === undefined) {
+      try {
+        const version = (await this.docker.version()) as { ApiVersion?: string };
+        this.workspaceVolumesSupported = apiVersionAtLeast(version.ApiVersion, MIN_SUBPATH_API_VERSION);
+      } catch {
+        this.workspaceVolumesSupported = false;
+      }
+    }
+    return this.workspaceVolumesSupported;
   }
 
   private async ensureNetwork(name: string): Promise<void> {
@@ -382,20 +473,27 @@ export class DockerPreviewRuntime implements PreviewRuntime {
   }
 
   /**
-   * Reap any workspace containers this course's preview server left behind and
-   * remove its now-unused network. The preview server reaps its own children on
-   * a graceful stop; this is the backstop for a hard kill.
+   * Reap any workspace containers this course's preview server left behind,
+   * remove its now-unused network, then best-effort remove its named volume. The
+   * preview server reaps its own children on a graceful stop; this is the
+   * backstop for a hard kill.
    */
   private async cleanupWorkspaceSupport(courseRoot: string): Promise<void> {
     const support = this.workspaces;
     if (support == null) {
       return;
     }
-    await this.reapWorkspaceContainers(workspaceHomeDir(support.homeRoot, courseRoot));
+    const volumeName = workspaceVolumeName(courseRoot);
+    await this.reapWorkspaceContainers(volumeName);
     await this.removeNetwork(previewNetworkName(previewCourseId(courseRoot)));
+    try {
+      await this.docker.getVolume(volumeName).remove({ force: true });
+    } catch {
+      /* still in use by a lingering container, or already gone */
+    }
   }
 
-  private async reapWorkspaceContainers(homeDir: string): Promise<void> {
+  private async reapWorkspaceContainers(homeRootLabel: string): Promise<void> {
     try {
       const containers = await this.docker.listContainers({
         all: true,
@@ -403,7 +501,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       });
       await Promise.all(
         containers
-          .filter((info) => info.Labels?.[PREVIEW_WORKSPACE_HOME_ROOT_LABEL] === homeDir)
+          .filter((info) => info.Labels?.[PREVIEW_WORKSPACE_HOME_ROOT_LABEL] === homeRootLabel)
           .map((info) => this.forceRemove(this.docker.getContainer(info.Id))),
       );
     } catch {
@@ -435,9 +533,20 @@ export function previewNetworkName(courseId: string): string {
   return `pl-preview-net-${courseId}`;
 }
 
-/** Per-course host directory holding workspace home dirs; bind-mounted at the identical path. */
-function workspaceHomeDir(homeRoot: string, courseRoot: string): string {
-  return path.join(homeRoot, previewCourseId(courseRoot));
+/** Per-course daemon-managed named volume holding the workspace home dirs. */
+function workspaceVolumeName(courseRoot: string): string {
+  return `pl-preview-workspaces-${previewCourseId(courseRoot)}`;
+}
+
+/**
+ * The bind source the daemon uses for the runtime socket. On Windows the
+ * dockerode client reaches the daemon over the `//./pipe/docker_engine` named
+ * pipe, but a bind mount's source is resolved inside the Docker Desktop VM,
+ * where the real Unix socket lives at `/var/run/docker.sock`. On every other
+ * platform the client socket path is itself bindable, so it passes through.
+ */
+function daemonSocketMountSource(clientSocketPath: string): string {
+  return process.platform === 'win32' ? '/var/run/docker.sock' : clientSocketPath;
 }
 
 function isConflict(error: unknown): boolean {
@@ -466,4 +575,24 @@ function isNoSuchImage(error: unknown): boolean {
   const status = (error as { statusCode?: number } | undefined)?.statusCode;
   const message = error instanceof Error ? error.message : String(error);
   return status === 404 || /no such image/i.test(message);
+}
+
+function isNoSuchContainer(error: unknown): boolean {
+  const status = (error as { statusCode?: number } | undefined)?.statusCode;
+  const message = error instanceof Error ? error.message : String(error);
+  return status === 404 || /no such container|already in progress/i.test(message);
+}
+
+/** Minimum Docker Engine API version for VolumeOptions.Subpath (Engine 25.0). */
+const MIN_SUBPATH_API_VERSION: readonly [number, number] = [1, 45];
+
+/** True when a `major.minor` Docker API version string is >= the given floor. */
+function apiVersionAtLeast(
+  apiVersion: string | undefined,
+  [minMajor, minMinor]: readonly [number, number],
+): boolean {
+  if (!apiVersion) return false;
+  const [major, minor] = apiVersion.split('.').map((part) => Number.parseInt(part, 10));
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) return false;
+  return major > minMajor || (major === minMajor && minor >= minMinor);
 }

@@ -8,6 +8,7 @@ import {
   PREVIEW_DOCKER_SOCKET_MOUNT,
   PREVIEW_LABEL,
   PREVIEW_SERVER_ENTRYPOINT,
+  PREVIEW_WORKSPACE_HOME_MOUNT,
   type PreviewImageInfo,
   buildPreviewContainerCreateOptions,
   formatBytes,
@@ -106,7 +107,7 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
   const workspaces = {
     dockerSocketPath: '/Users/author/.docker/run/docker.sock',
     network: 'pl-preview-net-my-course',
-    homeDir: '/tmp/pl-preview-workspaces/my-course',
+    homeVolume: 'pl-preview-workspaces-my-course',
     socketGid: 20,
   };
 
@@ -119,7 +120,7 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
     });
   }
 
-  it('mounts the runtime socket and an identically-pathed writable home dir', () => {
+  it('mounts the runtime socket and the named workspace-home volume', () => {
     const binds = workspaceOptions().HostConfig?.Binds ?? [];
 
     assert.ok(binds.includes(`${courseRoot}:/course:ro`), 'course stays read-only');
@@ -127,9 +128,10 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
       binds.includes(`${workspaces.dockerSocketPath}:${PREVIEW_DOCKER_SOCKET_MOUNT}`),
       'the host runtime socket must be mounted where the ambient client expects it',
     );
+    assert.equal(PREVIEW_WORKSPACE_HOME_MOUNT, '/pl-workspaces');
     assert.ok(
-      binds.includes(`${workspaces.homeDir}:${workspaces.homeDir}`),
-      'the home dir must be bind-mounted at the identical host path',
+      binds.includes(`${workspaces.homeVolume}:${PREVIEW_WORKSPACE_HOME_MOUNT}`),
+      'the named volume must be mounted at the fixed workspace-home mount point',
     );
   });
 
@@ -140,10 +142,17 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
     assert.deepEqual(host.GroupAdd, ['20']);
   });
 
-  it('passes the workspace home dir and network to the server, keeping workspaces on', () => {
+  it('passes the fixed home mount, the named volume, and the network to the server, keeping workspaces on', () => {
     const cmd = workspaceOptions().Cmd ?? [];
 
-    assert.ok(adjacent(cmd, '--workspace-home-dir', workspaces.homeDir));
+    assert.ok(
+      adjacent(cmd, '--workspace-home-dir', PREVIEW_WORKSPACE_HOME_MOUNT),
+      'the server writes homes at the fixed in-container mount, not a host path',
+    );
+    assert.ok(
+      adjacent(cmd, '--workspace-home-volume', workspaces.homeVolume),
+      'the server needs the named volume so sibling containers mount its subpaths',
+    );
     assert.ok(adjacent(cmd, '--workspace-network', workspaces.network));
     assert.ok(!cmd.includes('--no-workspaces'), 'workspaces stay enabled');
   });

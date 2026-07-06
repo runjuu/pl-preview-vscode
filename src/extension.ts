@@ -687,15 +687,12 @@ function buildRuntime(candidate: RuntimeCandidate): void {
  * workspace and a socket endpoint we can actually bind-mount (podman-machine /
  * remote tcp/ssh endpoints have no local socket).
  *
- * Excluded on Windows: the feature relies on bind-mounting the workspace home
- * dir at an *identical* host/container path (so the sibling workspace containers
- * can bind the same host paths) and on mounting the runtime socket. Neither
- * translates to Docker Desktop for Windows — a `C:\…` host path is not a valid
- * Linux container mount point (its drive-letter colon also breaks Docker's
- * `source:dest:mode` bind parsing, failing the whole container launch), and the
- * endpoint is a named pipe rather than a bind-mountable Unix socket. So we leave
- * workspaces disabled there; ordinary questions render normally and workspace
- * questions show the built-in "disabled" page instead of breaking every preview.
+ * Windows is supported: the workspace home dirs live in a daemon-managed named
+ * volume (not a host path), and the runtime socket is bound from its real Unix
+ * path inside the Docker Desktop VM (`/var/run/docker.sock`) even though the
+ * dockerode client reaches the daemon over the `//./pipe/docker_engine` named
+ * pipe — so neither the drive-letter host path nor the named pipe leaks into a
+ * bind mount. The named-pipe endpoint still classifies as a `socket` endpoint.
  *
  * Returns the support config when enabled, or a short human `disabledReason`
  * naming the specific gate that failed — the Output channel echoes it verbatim,
@@ -708,16 +705,12 @@ function computeWorkspaceSupport(endpoint: RuntimeEndpoint): WorkspaceSupportDec
   if (endpoint.kind !== 'socket') {
     return { disabledReason: 'the container runtime is not reachable over a local socket' };
   }
-  if (process.platform === 'win32') {
-    return { disabledReason: 'not supported on Windows (Docker Desktop bind-mount limits)' };
-  }
   if (!vscode.workspace.getConfiguration('plPreview').get<boolean>('enableWorkspaces', true)) {
     return { disabledReason: 'turned off via the plPreview.enableWorkspaces setting' };
   }
   return {
     support: {
       dockerSocketPath: endpoint.socketPath,
-      homeRoot: path.join(os.tmpdir(), 'pl-preview-vscode-workspaces'),
       socketGid: socketGroupId(endpoint.socketPath),
     },
   };
