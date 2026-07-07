@@ -4,6 +4,9 @@ All notable changes to PrairieLearn Preview will be documented in this file.
 
 ## Unreleased
 
+- Add common Prairie misspellings and single-character omissions to the extension
+  keywords so PrairieLearn searches are more forgiving.
+
 ## 1.2.0 - 2026-07-06
 
 - Support workspace question previews on Windows with Docker Desktop by storing
