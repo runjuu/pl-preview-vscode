@@ -24,7 +24,9 @@ import {
 
 const packageRoot = path.dirname(__dirname);
 
-function readManifest(): { contributes: { commands: Array<{ command: string; title: string }> } } {
+function readManifest(): {
+  contributes: { commands: Array<{ command: string; title: string }> };
+} {
   return JSON.parse(readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
 }
 
@@ -161,7 +163,11 @@ describe('startingPanelHtml', () => {
   });
 
   it('marks earlier phases done once the readiness wait is active', () => {
-    const html = startingPanelHtml({ phase: 'waitingForServer', elapsedMs: 3000, timeoutMs: 60000 });
+    const html = startingPanelHtml({
+      phase: 'waitingForServer',
+      elapsedMs: 3000,
+      timeoutMs: 60000,
+    });
 
     assert.match(html, /id="step-0" data-status="done"/);
     assert.match(html, /id="step-1" data-status="done"/);
@@ -184,7 +190,7 @@ describe('startingPanelHtml', () => {
 });
 
 describe('previewPanelHtml', () => {
-  const src = 'http://127.0.0.1:49812/questions/arithmetic?variant=1';
+  const src = 'http://127.0.0.1:49812/preview-sessions/pvs_0123456789abcdefghijkl/questions/arithmetic?variant=1';
 
   it('frames the rendered question with the workspace-capable iframe posture', () => {
     const html = previewPanelHtml({ src, variant: '1' });
@@ -275,7 +281,7 @@ describe('previewPanelHtml', () => {
 
   it('accepts workspace-open messages from the proxied question iframe', () => {
     const html = previewPanelHtml({
-      src: 'http://127.0.0.1:49999/questions/arithmetic?variant=1',
+      src: 'http://127.0.0.1:49999/preview-sessions/pvs_0123456789abcdefghijkl/questions/arithmetic?variant=1',
       variant: '1',
       workspaceBridgeToken: 'workspace-token',
       workspaceTargetOrigin: 'http://127.0.0.1:49812',
@@ -290,7 +296,7 @@ describe('previewPanelHtml', () => {
 
   it('escapes the iframe src so it cannot break out of the attribute', () => {
     const html = previewPanelHtml({
-      src: 'http://127.0.0.1:1/questions/a"><script>x?variant=1',
+      src: 'http://127.0.0.1:1/preview-sessions/pvs_0123456789abcdefghijkl/questions/a"><script>x?variant=1',
       variant: '1',
     });
 
@@ -298,14 +304,17 @@ describe('previewPanelHtml', () => {
   });
 
   it('escapes the variant so it cannot break out of the toolbar', () => {
-    const html = previewPanelHtml({ src, variant: '"><script>evil()</script>' });
+    const html = previewPanelHtml({
+      src,
+      variant: '"><script>evil()</script>',
+    });
 
     assert.doesNotMatch(html, /<script>evil/);
   });
 });
 
 describe('workspacePanelHtml', () => {
-  const src = 'http://127.0.0.1:49812/workspace/1';
+  const src = 'http://127.0.0.1:49812/preview-sessions/pvs_0123456789abcdefghijkl/workspace/1';
 
   it('frames the workspace page in a complete standalone HTML document', () => {
     const html = workspacePanelHtml({ src });
@@ -380,7 +389,7 @@ describe('previewPanelTitle', () => {
 });
 
 describe('workspacePanelTitle', () => {
-  it("names the tab after the question, suffixed with (Workspace)", () => {
+  it('names the tab after the question, suffixed with (Workspace)', () => {
     assert.equal(workspacePanelTitle('Random arithmetic', '1'), 'Random arithmetic (Workspace)');
   });
 

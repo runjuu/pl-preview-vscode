@@ -31,6 +31,9 @@ PrairieLearn Preview turns that into a tighter loop: edit ↔️ preview.
   it.
 - Keep the same variant seed across refreshes so edits are easy to compare.
 - Reroll the current question with **New variant**.
+- Preview all six PrairieLearn Source Question Types: `v3`, `Calculation`,
+  `MultipleChoice`, `Checkbox`, `File`, and `MultipleTrueFalse`.
+- Use stateless **Preview Answer Check** in the server's explicit full mode.
 - Use any Docker-compatible local container runtime.
 - Preview **workspace questions** without leaving VS Code.
 - Show render and container logs from the **PrairieLearn Preview** Output channel.
@@ -45,7 +48,7 @@ PrairieLearn Preview turns that into a tighter loop: edit ↔️ preview.
   through their Docker-compatible socket)
 - A PrairieLearn course folder open in VS Code, with `infoCourse.json` at the
   course root
-- PrairieLearn v3/Freeform questions
+- Questions using any of PrairieLearn's six Source Question Types
 
 ## Install
 
@@ -91,6 +94,19 @@ version for reproducible previews), with your course folder mounted
 fork. The extension points a VS Code webview at the loopback server so the
 active question renders beside your editor.
 
+Before showing a question, the extension checks the server's public health
+endpoint, discovers the `experimental-1` capabilities through an authenticated
+control plane, and creates or deliberately reuses a Local Preview Session for
+the mounted course. The opaque session ID scopes the question, course/question
+assets, generated/submission files, and Preview Workspace URLs. The extension
+generates the control-plane bearer token inside the extension host and never
+puts it in browser HTML or requests.
+
+The container requests `full` rendering explicitly so Preview Answer Check is
+available; the Standalone Preview Server itself now defaults to
+`question-only`. Preview Workspaces remain a separate opt-in server capability
+and are enabled only when the trusted-workspace/runtime checks below pass.
+
 Every time you save, it re-renders the current question, reusing the server that
 is already running ("warm") so refreshes are nearly instant. The variant seed
 stays the same across refreshes, so before and after are easy to compare, and
@@ -106,27 +122,30 @@ flowchart LR
   ext["PrairieLearn Preview Extension"]
   runtime["Docker-compatible<br/>container runtime"]
   subgraph container["Local preview container"]
-    server["PrairieLearn<br/>preview server"]
+    server["PrairieLearn<br/>Standalone Preview Server"]
+    session["Local Preview Session"]
   end
 
   editor -->|"active question<br/>detected on edit / save"| ext
   ext -->|"start or reuse server<br/>(course mounted read-only)"| runtime
   runtime --> container
-  ext -->|"preview URL / variant"| panel
-  panel <-->|"rendered question<br/>over loopback HTTP"| server
+  ext -->|"health + metadata<br/>create/reuse session"| server
+  server --> session
+  ext -->|"session-scoped URL / variant"| panel
+  panel <-->|"rendered question + scoped resources<br/>over loopback HTTP"| session
 ```
 
 ## Commands
 
 You can also run PrairieLearn Preview commands from the Command Palette:
 
-| Command | What it does |
-| --- | --- |
-| **PrairieLearn Preview: Open Preview** | Opens the side-by-side preview for the active question. |
-| **PrairieLearn Preview: Refresh preview** | Re-renders the current preview immediately. |
-| **PrairieLearn Preview: New variant** | Rerolls the current question's variant seed. |
-| **PrairieLearn Preview: Show logs** | Opens the **PrairieLearn Preview** Output channel. |
-| **PrairieLearn Preview: Stop preview servers** | Stops all running local preview servers. |
+| Command                                             | What it does                                                               |
+| --------------------------------------------------- | -------------------------------------------------------------------------- |
+| **PrairieLearn Preview: Open Preview**              | Opens the side-by-side preview for the active question.                    |
+| **PrairieLearn Preview: Refresh preview**           | Re-renders the current preview immediately.                                |
+| **PrairieLearn Preview: New variant**               | Rerolls the current question's variant seed.                               |
+| **PrairieLearn Preview: Show logs**                 | Opens the **PrairieLearn Preview** Output channel.                         |
+| **PrairieLearn Preview: Stop preview servers**      | Stops all running local preview servers.                                   |
 | **PrairieLearn Preview: Delete old preview images** | Removes superseded preview container images after asking for confirmation. |
 
 ## Container runtime
@@ -138,11 +157,11 @@ and OrbStack all work with no configuration.
 
 To configure runtime behavior, use these VS Code settings:
 
-| Setting | What it does |
-| --- | --- |
-| `plPreview.containerRuntime` | `auto` (default), `docker`, `podman`, or `custom`. |
-| `plPreview.containerHost` | An explicit endpoint, e.g. `unix:///run/user/1000/podman/podman.sock`, `tcp://127.0.0.1:2375`, or `npipe:////./pipe/podman-machine-default`. Required for `custom`; with `auto` it overrides detection. |
-| `plPreview.enableWorkspaces` | `true` (default). Preview workspace questions; see [Workspace questions](#workspace-questions). Set to `false` to keep the preview container fully jailed. |
+| Setting                      | What it does                                                                                                                                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `plPreview.containerRuntime` | `auto` (default), `docker`, `podman`, or `custom`.                                                                                                                                                      |
+| `plPreview.containerHost`    | An explicit endpoint, e.g. `unix:///run/user/1000/podman/podman.sock`, `tcp://127.0.0.1:2375`, or `npipe:////./pipe/podman-machine-default`. Required for `custom`; with `auto` it overrides detection. |
+| `plPreview.enableWorkspaces` | `true` (default). Preview workspace questions; see [Workspace questions](#workspace-questions). Set to `false` to keep the preview container fully jailed.                                              |
 
 When multiple runtimes are running and `auto` is selected, Docker is preferred;
 set `plPreview.containerRuntime` to `podman` to force Podman.
@@ -192,7 +211,6 @@ rootless daemon, a compromise affects your user account rather than host root.
   local container.
 - The first use can take a few minutes while the runtime downloads the preview
   image.
-- Only PrairieLearn v3/Freeform questions are previewed.
 - Unsaved editor changes are not rendered. Save the file to refresh the preview.
 
 ## Troubleshooting
@@ -217,7 +235,16 @@ image and warm preview servers.
 
 **The panel says the question type is not previewable.**
 
-PrairieLearn Preview renders v3/Freeform questions. Check the question's `info.json`.
+Check that `info.json` uses one of `v3`, `Calculation`, `MultipleChoice`,
+`Checkbox`, `File`, or `MultipleTrueFalse`. Other custom type values are outside
+the Standalone Preview Server contract.
+
+**The preview reports an incompatible server contract.**
+
+The extension requires `apiVersion: experimental-1`, full rendering with
+Preview Answer Check, and a Preview Workspace capability matching the launch
+choice. Delete superseded preview images, verify `PL_PREVIEW_IMAGE` is not
+pointing at an older proof-of-concept build, and reopen the preview.
 
 **The preview failed.**
 
@@ -239,6 +266,16 @@ Extension Development Host. Open a PrairieLearn course folder, open a question
 file, and click the preview button in the editor title bar.
 
 Use `PL_PREVIEW_IMAGE` to point the extension at a self-built preview image.
+To run the Docker contract against the published preview image, provide an immutable
+digest (mutable tags and `latest` are rejected):
+
+```sh
+PL_PREVIEW_CONTRACT_IMAGE='ghcr.io/runjuu/prairielearn:sha-6fd23e1@sha256:d480645624195991e42197f9105ae1a818065ca58098da041a2a6403fde3862a' \
+  pnpm run test:contract
+```
+
+Also set `PL_PREVIEW_CONTRACT_SOCKET` to exercise explicit Preview Workspace
+launch capability through a local Docker-compatible socket.
 
 ## Release
 

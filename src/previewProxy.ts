@@ -27,7 +27,8 @@ export interface PreviewProxyOptions {
  * Narrow reverse proxy in front of the preview server.
  *
  * It passes non-HTML responses through unchanged and rewrites only rendered
- * question HTML (`/questions/...`) to intercept PrairieLearn's workspace button.
+ * question HTML below a Local Preview Session to intercept PrairieLearn's
+ * workspace button.
  */
 export class PreviewProxy {
   private readonly server: http.Server;
@@ -92,14 +93,10 @@ export class PreviewProxy {
         method: req.method,
       },
       (proxyRes) => {
-        const responseHeaders = responseHeadersForClient(
-          proxyRes.headers,
-          this.targetOrigin.origin,
-          this.origin,
-        );
+        const responseHeaders = responseHeadersForClient(proxyRes.headers, this.targetOrigin.origin, this.origin);
         const contentType = headerValue(proxyRes.headers['content-type']);
         const shouldRewrite =
-          targetUrl.pathname.startsWith('/questions/') &&
+          /^\/preview-sessions\/[^/]+\/questions(?:\/|$)/.test(targetUrl.pathname) &&
           (contentType == null || /\btext\/html\b/i.test(contentType));
 
         if (!shouldRewrite) {
@@ -152,10 +149,7 @@ export function rewritePreviewQuestionHtml(
   return `${html}\n${script}`;
 }
 
-function workspaceBridgeScript({
-  targetOrigin,
-  workspaceBridgeToken,
-}: RewritePreviewQuestionHtmlOptions): string {
+function workspaceBridgeScript({ targetOrigin, workspaceBridgeToken }: RewritePreviewQuestionHtmlOptions): string {
   return `<script>
 (() => {
   const workspaceBridgeToken = ${JSON.stringify(workspaceBridgeToken)};

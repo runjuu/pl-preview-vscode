@@ -26,7 +26,7 @@ const TAG = 'latest';
 const REVISION_LABEL = 'org.opencontainers.image.revision';
 const SPEC_PATH = fileURLToPath(new URL('../src/containerSpec.ts', import.meta.url));
 // Captures the quoted image ref on the `DEFAULT_PREVIEW_IMAGE` line.
-const PIN_RE = /(export const DEFAULT_PREVIEW_IMAGE = ')([^']*)(';)/;
+const PIN_RE = /(export const DEFAULT_PREVIEW_IMAGE\s*=\s*')([^']*)(';)/;
 
 // Media types we accept when asking for a manifest: OCI + legacy Docker, both
 // index (multi-arch) and single-image, so ghcr returns the manifest as-is

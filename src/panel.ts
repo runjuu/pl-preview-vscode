@@ -57,10 +57,7 @@ export function previewPanelTitle(questionName: string | undefined): string {
  * `Workspace <id>` when the opening question is unknown, or the plain
  * {@link WORKSPACE_PANEL_TITLE} when even the id is missing.
  */
-export function workspacePanelTitle(
-  questionName: string | undefined,
-  id: string | undefined,
-): string {
+export function workspacePanelTitle(questionName: string | undefined, id: string | undefined): string {
   const trimmed = questionName?.trim();
   if (trimmed) return `${trimmed} (Workspace)`;
   return id ? `Workspace ${id}` : WORKSPACE_PANEL_TITLE;
@@ -171,8 +168,7 @@ export function startingPanelHtml(progress?: PreviewStartupProgress): string {
     .map((step, index) => {
       // The raw Docker status line lives under the pull step (index 0), the only
       // phase it describes; it stays in the DOM (updated in place) but hides when empty.
-      const detail =
-        index === 0 ? `<span class="detail" id="detail">${escapeHtml(view.detail ?? '')}</span>` : '';
+      const detail = index === 0 ? `<span class="detail" id="detail">${escapeHtml(view.detail ?? '')}</span>` : '';
       return (
         `<li id="step-${index}" data-status="${step.status}">` +
         `<span class="label">${escapeHtml(step.label)}</span>` +
@@ -372,7 +368,7 @@ export interface PreviewPanelInput {
  *
  * The CSP relaxes `default-src 'none'` only far enough to frame that one origin
  * (`frame-src <origin>`), so the preview server's absolute-from-root asset URLs
- * (`/preview-render/*`, `/assets/*`) resolve while nothing else may be framed,
+ * (session-scoped resources plus global `/assets/*`) resolve while nothing else may be framed,
  * plus a single nonce'd `script-src` for the toolbar and workspace-link bridge
  * messages. The question iframe points at a same-process loopback proxy, so
  * workspace links rendered by `pl-workspace` can be rewritten to post an
@@ -556,10 +552,7 @@ export interface WorkspacePanelInput {
  * iframe sandbox mirrors the preview panel's (forms, popups, modals, downloads for
  * interactive workspace UIs) and keeps `referrerpolicy="no-referrer"`.
  */
-export function workspacePanelHtml({
-  src,
-  hostMessageToken = scriptNonce(),
-}: WorkspacePanelInput): string {
+export function workspacePanelHtml({ src, hostMessageToken = scriptNonce() }: WorkspacePanelInput): string {
   const origin = new URL(src).origin;
   const nonce = scriptNonce();
   return `<!DOCTYPE html>

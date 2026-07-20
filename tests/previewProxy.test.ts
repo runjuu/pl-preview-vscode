@@ -22,10 +22,13 @@ afterEach(async () => {
 
 describe('rewritePreviewQuestionHtml', () => {
   it('injects a workspace click bridge before the body close', () => {
-    const html = rewritePreviewQuestionHtml('<html><body><a href="/workspace/1">Open workspace</a></body></html>', {
-      targetOrigin: 'http://127.0.0.1:49812',
-      workspaceBridgeToken: 'token-1',
-    });
+    const html = rewritePreviewQuestionHtml(
+      '<html><body><a href="/preview-sessions/pvs_0123456789abcdefghijkl/workspace/1">Open workspace</a></body></html>',
+      {
+        targetOrigin: 'http://127.0.0.1:49812',
+        workspaceBridgeToken: 'token-1',
+      },
+    );
 
     assert.match(html, /workspaceBridgeToken = "token-1"/);
     assert.match(html, /workspaceTargetOrigin = "http:\/\/127\.0\.0\.1:49812"/);
@@ -35,11 +38,12 @@ describe('rewritePreviewQuestionHtml', () => {
 });
 
 describe('PreviewProxy', () => {
-  it('rewrites question HTML responses and keeps asset responses untouched', async () => {
+  it('rewrites session-scoped question HTML responses and keeps assets untouched', async () => {
+    const sessionPrefix = '/preview-sessions/pvs_0123456789abcdefghijkl';
     const upstream = await startServer((req, res) => {
-      if (req.url?.startsWith('/questions/demo')) {
+      if (req.url?.startsWith(`${sessionPrefix}/questions/demo`)) {
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end('<html><body><a target="_blank" href="/workspace/1">Open workspace</a></body></html>');
+        res.end(`<html><body><a target="_blank" href="${sessionPrefix}/workspace/1">Open workspace</a></body></html>`);
         return;
       }
       res.writeHead(200, { 'content-type': 'text/plain', 'x-demo': 'asset' });
@@ -47,37 +51,38 @@ describe('PreviewProxy', () => {
     });
 
     const proxy = await startProxy(upstream.origin, 'bridge-token');
-    const question = await fetch(`${proxy.origin}/questions/demo?variant=1`);
+    const question = await fetch(`${proxy.origin}${sessionPrefix}/questions/demo?variant=1`);
     const questionHtml = await question.text();
     assert.match(questionHtml, /bridge-token/);
     assert.match(questionHtml, /plPreview\.openWorkspace/);
 
-    const asset = await fetch(`${proxy.origin}/preview-render/course.css`);
+    const asset = await fetch(`${proxy.origin}${sessionPrefix}/preview-render/course.css`);
     assert.equal(asset.headers.get('x-demo'), 'asset');
     assert.equal(await asset.text(), 'asset body');
   });
 
   it('maps proxied question URLs back to the real preview origin', async () => {
     const proxy = await startProxy('http://127.0.0.1:49812', 'token');
+    const pathname = '/preview-sessions/pvs_0123456789abcdefghijkl/questions/demo?variant=1';
 
-    assert.equal(
-      proxy.urlFor('http://127.0.0.1:49812/questions/demo?variant=1'),
-      `${proxy.origin}/questions/demo?variant=1`,
-    );
-    assert.throws(() => proxy.urlFor('http://127.0.0.1:60000/questions/demo?variant=1'));
+    assert.equal(proxy.urlFor(`http://127.0.0.1:49812${pathname}`), `${proxy.origin}${pathname}`);
+    assert.throws(() => proxy.urlFor(`http://127.0.0.1:60000${pathname}`));
   });
 
   it('rewrites absolute redirects from the preview server back through the proxy', async () => {
+    const pathname = '/preview-sessions/pvs_0123456789abcdefghijkl/questions/next?variant=1';
     const upstream = await startServer((_req, res) => {
-      res.writeHead(302, { location: `${upstream.origin}/questions/next?variant=1` });
+      res.writeHead(302, { location: `${upstream.origin}${pathname}` });
       res.end();
     });
     const proxy = await startProxy(upstream.origin, 'token');
 
-    const response = await fetch(`${proxy.origin}/questions/demo`, { redirect: 'manual' });
+    const response = await fetch(`${proxy.origin}${pathname}`, {
+      redirect: 'manual',
+    });
 
     assert.equal(response.status, 302);
-    assert.equal(response.headers.get('location'), `${proxy.origin}/questions/next?variant=1`);
+    assert.equal(response.headers.get('location'), `${proxy.origin}${pathname}`);
   });
 });
 

@@ -6,6 +6,21 @@ All notable changes to PrairieLearn Preview will be documented in this file.
 
 - Add common Prairie misspellings and single-character omissions to the extension
   keywords so PrairieLearn searches are more forgiving.
+- Migrate startup and Editor-Following Preview to the Standalone Preview Server's
+  `experimental-1` Local Preview Session contract: discover health/metadata,
+  create or deliberately reuse `/course`, and use scoped question/resource URLs.
+- Protect metadata and session management with an extension-generated bearer
+  token that is never exposed to preview browser content, and delete the owned
+  Local Preview Session before stopping its container.
+- Request full mode explicitly for Preview Answer Check and enable Preview
+  Workspaces only through the positive `--workspaces` launch choice.
+- Preview all six Source Question Types and keep workspace page/status/reboot/reset
+  traffic under the owning Local Preview Session.
+- Add an environment-gated Docker contract that rejects mutable image references
+  and verifies session create/reuse, scoped full rendering, source refresh,
+  cleanup, and optional Preview Workspace capability against the pinned image.
+- Pin the default server to the verified `preview-server-experimental-1-rc.1`
+  multi-architecture image digest after both release contract cases pass.
 
 ## 1.2.0 - 2026-07-06
 

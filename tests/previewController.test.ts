@@ -18,6 +18,7 @@ import type { PreviewTarget } from '../src/previewTarget';
 import type { PreviewStartupProgress } from '../src/startupProgress';
 
 const tempRoots: string[] = [];
+const PREVIEW_SESSION_ID = 'pvs_0123456789abcdefghijkl';
 
 async function makeCourse(): Promise<string> {
   const courseRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pl-preview-controller-'));
@@ -30,7 +31,9 @@ async function makeCourse(): Promise<string> {
     await fs.writeFile(path.join(dir, 'question.html'), '');
     await fs.writeFile(path.join(dir, 'server.py'), '');
   }
-  await fs.mkdir(path.join(courseRoot, 'elements', 'pl-thing'), { recursive: true });
+  await fs.mkdir(path.join(courseRoot, 'elements', 'pl-thing'), {
+    recursive: true,
+  });
   await fs.writeFile(path.join(courseRoot, 'elements', 'pl-thing', 'pl-thing.py'), '');
   return courseRoot;
 }
@@ -97,9 +100,9 @@ class InstantRuntime implements ContainerRuntime {
   readonly stops: string[] = [];
   stopAllCount = 0;
   constructor(private readonly port = 49876) {}
-  async ensureRunning(courseRoot: string): Promise<{ port: number }> {
+  async ensureRunning(courseRoot: string): Promise<{ port: number; previewSessionId: string }> {
     this.calls.push(courseRoot);
-    return { port: this.port };
+    return { port: this.port, previewSessionId: PREVIEW_SESSION_ID };
   }
   async stop(courseRoot: string): Promise<void> {
     this.stops.push(courseRoot);
@@ -114,9 +117,9 @@ class DeferredRuntime implements ContainerRuntime {
   readonly calls: string[] = [];
   readonly stops: string[] = [];
   stopAllCount = 0;
-  private readonly resolvers: Array<(value: { port: number }) => void> = [];
+  private readonly resolvers: Array<(value: { port: number; previewSessionId: string }) => void> = [];
   private readonly rejecters: Array<(reason: unknown) => void> = [];
-  async ensureRunning(courseRoot: string): Promise<{ port: number }> {
+  async ensureRunning(courseRoot: string): Promise<{ port: number; previewSessionId: string }> {
     this.calls.push(courseRoot);
     return new Promise((resolve, reject) => {
       this.resolvers.push(resolve);
@@ -130,7 +133,7 @@ class DeferredRuntime implements ContainerRuntime {
     this.stopAllCount += 1;
   }
   resolveCall(index: number, port: number): void {
-    this.resolvers[index]({ port });
+    this.resolvers[index]({ port, previewSessionId: PREVIEW_SESSION_ID });
   }
   rejectCall(index: number, reason: unknown): void {
     this.rejecters[index](reason);
@@ -143,7 +146,7 @@ class ThrowingRuntime implements ContainerRuntime {
   readonly stops: string[] = [];
   stopAllCount = 0;
   constructor(private readonly error: unknown = new Error('docker daemon unreachable')) {}
-  async ensureRunning(courseRoot: string): Promise<{ port: number }> {
+  async ensureRunning(courseRoot: string): Promise<{ port: number; previewSessionId: string }> {
     this.calls.push(courseRoot);
     throw this.error;
   }
@@ -255,7 +258,7 @@ describe('PreviewController — active editor following', () => {
     assert.deepEqual(sink.kinds(), ['starting', 'preview']);
     assert.deepEqual(sink.last, {
       kind: 'preview',
-      url: 'http://127.0.0.1:49876/questions/arithmetic?variant=1',
+      url: `http://127.0.0.1:49876/preview-sessions/${PREVIEW_SESSION_ID}/questions/arithmetic?variant=1`,
       variant: '1',
     });
   });
@@ -267,7 +270,7 @@ describe('PreviewController — active editor following', () => {
     await flush();
     assert.deepEqual(sink.last, {
       kind: 'preview',
-      url: 'http://127.0.0.1:49876/questions/topic/sub/q1?variant=1',
+      url: `http://127.0.0.1:49876/preview-sessions/${PREVIEW_SESSION_ID}/questions/topic/sub/q1?variant=1`,
       variant: '1',
     });
   });
@@ -384,7 +387,11 @@ describe('PreviewController — refresh on save', () => {
     await flush();
 
     assert.deepEqual(sink.states.slice(before), [
-      { kind: 'preview', url: 'http://127.0.0.1:49876/questions/arithmetic?variant=1', variant: '1' },
+      {
+        kind: 'preview',
+        url: `http://127.0.0.1:49876/preview-sessions/${PREVIEW_SESSION_ID}/questions/arithmetic?variant=1`,
+        variant: '1',
+      },
     ]);
   });
 
@@ -426,7 +433,11 @@ describe('PreviewController — refresh on save', () => {
     await controller.refresh();
     await flush();
     assert.deepEqual(sink.states.slice(before), [
-      { kind: 'preview', url: 'http://127.0.0.1:49876/questions/arithmetic?variant=1', variant: '1' },
+      {
+        kind: 'preview',
+        url: `http://127.0.0.1:49876/preview-sessions/${PREVIEW_SESSION_ID}/questions/arithmetic?variant=1`,
+        variant: '1',
+      },
     ]);
   });
 });
@@ -448,7 +459,7 @@ describe('PreviewController — stable preview variant', () => {
 
     assert.deepEqual(sink.last, {
       kind: 'preview',
-      url: 'http://127.0.0.1:49876/questions/arithmetic?variant=1',
+      url: `http://127.0.0.1:49876/preview-sessions/${PREVIEW_SESSION_ID}/questions/arithmetic?variant=1`,
       variant: '1',
     });
   });
@@ -485,7 +496,7 @@ describe('PreviewController — stable preview variant', () => {
     assert.deepEqual(sink.states.slice(before), [
       {
         kind: 'preview',
-        url: 'http://127.0.0.1:49876/questions/arithmetic?variant=abc',
+        url: `http://127.0.0.1:49876/preview-sessions/${PREVIEW_SESSION_ID}/questions/arithmetic?variant=abc`,
         variant: 'abc',
       },
     ]);
@@ -509,7 +520,7 @@ describe('PreviewController — stable preview variant', () => {
     assert.deepEqual(sink.states.slice(before), [
       {
         kind: 'preview',
-        url: 'http://127.0.0.1:49876/questions/arithmetic?variant=abc',
+        url: `http://127.0.0.1:49876/preview-sessions/${PREVIEW_SESSION_ID}/questions/arithmetic?variant=abc`,
         variant: 'abc',
       },
     ]);
@@ -529,7 +540,7 @@ describe('PreviewController — stable preview variant', () => {
     await source.setActiveFile(q1Server());
     assert.deepEqual(sink.last, {
       kind: 'preview',
-      url: 'http://127.0.0.1:49876/questions/topic/sub/q1?variant=1',
+      url: `http://127.0.0.1:49876/preview-sessions/${PREVIEW_SESSION_ID}/questions/topic/sub/q1?variant=1`,
       variant: '1',
     });
 
@@ -537,7 +548,7 @@ describe('PreviewController — stable preview variant', () => {
     await source.setActiveFile(arithmeticHtml());
     assert.deepEqual(sink.last, {
       kind: 'preview',
-      url: 'http://127.0.0.1:49876/questions/arithmetic?variant=abc',
+      url: `http://127.0.0.1:49876/preview-sessions/${PREVIEW_SESSION_ID}/questions/arithmetic?variant=abc`,
       variant: 'abc',
     });
   });
@@ -571,7 +582,10 @@ describe('PreviewController — concurrency and disposal', () => {
     };
     const resolveTarget = async (file: string) => target[file] ?? null;
     const runtime = new DeferredRuntime();
-    const { source, sink, controller } = makeController(courseRoot, { runtime, resolveTarget });
+    const { source, sink, controller } = makeController(courseRoot, {
+      runtime,
+      resolveTarget,
+    });
     await controller.start();
 
     source.setActiveFile('A');
@@ -587,27 +601,36 @@ describe('PreviewController — concurrency and disposal', () => {
     assert.deepEqual(runtime.calls, [courseRoot, courseRoot]);
     assert.deepEqual(sink.last, {
       kind: 'preview',
-      url: 'http://127.0.0.1:2222/questions/topic/sub/q1?variant=1',
+      url: `http://127.0.0.1:2222/preview-sessions/${PREVIEW_SESSION_ID}/questions/topic/sub/q1?variant=1`,
       variant: '1',
     });
   });
 
-  it('surfaces a not-previewable state for a non-v3 question and never starts a container', async () => {
+  it('surfaces a not-previewable state for a type outside the six Source Question Types', async () => {
     const { source, runtime, sink, controller } = makeController(courseRoot, {
-      resolveTarget: async () => ({ courseRoot, qid: 'legacy', type: 'Calculation' }),
+      resolveTarget: async () => ({
+        courseRoot,
+        qid: 'custom',
+        type: 'ExternalCustomType',
+      }),
     });
     source.openFile(path.join(courseRoot, 'questions', 'legacy', 'info.json'));
     await controller.start();
     await flush();
 
     assert.deepEqual(sink.kinds(), ['notPreviewable']);
-    assert.deepEqual(sink.last, { kind: 'notPreviewable', type: 'Calculation' });
-    assert.deepEqual((runtime as InstantRuntime).calls, [], 'no container is started for a non-v3 type');
+    assert.deepEqual(sink.last, {
+      kind: 'notPreviewable',
+      type: 'ExternalCustomType',
+    });
+    assert.deepEqual((runtime as InstantRuntime).calls, [], 'no container is started for an unsupported type');
   });
 
   it('surfaces a render/launch failure as a loud error state carrying the failure message', async () => {
     const runtime = new ThrowingRuntime(new Error('Cannot connect to the Docker daemon'));
-    const { source, sink, controller } = makeController(courseRoot, { runtime });
+    const { source, sink, controller } = makeController(courseRoot, {
+      runtime,
+    });
     source.openFile(path.join(courseRoot, 'questions', 'arithmetic', 'question.html'));
     await controller.start();
     await flush();
@@ -624,7 +647,10 @@ describe('PreviewController — concurrency and disposal', () => {
     };
     const resolveTarget = async (file: string) => target[file] ?? null;
     const runtime = new DeferredRuntime();
-    const { source, sink, controller } = makeController(courseRoot, { runtime, resolveTarget });
+    const { source, sink, controller } = makeController(courseRoot, {
+      runtime,
+      resolveTarget,
+    });
     await controller.start();
 
     source.setActiveFile('A');
@@ -640,7 +666,7 @@ describe('PreviewController — concurrency and disposal', () => {
     assert.ok(!sink.kinds().includes('error'), 'the superseded failure never reaches the sink');
     assert.deepEqual(sink.last, {
       kind: 'preview',
-      url: 'http://127.0.0.1:2222/questions/topic/sub/q1?variant=1',
+      url: `http://127.0.0.1:2222/preview-sessions/${PREVIEW_SESSION_ID}/questions/topic/sub/q1?variant=1`,
       variant: '1',
     });
   });
@@ -700,13 +726,16 @@ describe('PreviewController — warm container pool', () => {
     );
     assert.equal(
       (sink.last as { url: string }).url,
-      'http://127.0.0.1:49876/questions/q?variant=1',
+      `http://127.0.0.1:49876/preview-sessions/${PREVIEW_SESSION_ID}/questions/q?variant=1`,
     );
   });
 
   it('evicts the least-recently-used course when the pool cap is exceeded', async () => {
     // A large idle TTL keeps reaping out of the way so only LRU eviction fires.
-    const { source, sink, runtime, controller } = poolController({ poolCap: 2, idleTtlMs: 1e9 });
+    const { source, sink, runtime, controller } = poolController({
+      poolCap: 2,
+      idleTtlMs: 1e9,
+    });
     const rt = runtime as InstantRuntime;
 
     source.openFile('a.html');
@@ -727,7 +756,10 @@ describe('PreviewController — warm container pool', () => {
   });
 
   it('reaps a container left idle past the TTL while keeping the on-screen course warm', async () => {
-    const { source, runtime, clock, controller } = poolController({ poolCap: 3, idleTtlMs: 1_000 });
+    const { source, runtime, clock, controller } = poolController({
+      poolCap: 3,
+      idleTtlMs: 1_000,
+    });
     const rt = runtime as InstantRuntime;
 
     source.openFile('a.html');
@@ -744,7 +776,10 @@ describe('PreviewController — warm container pool', () => {
   });
 
   it("resets a course's idle window each time it is re-previewed", async () => {
-    const { source, runtime, clock, controller } = poolController({ poolCap: 3, idleTtlMs: 1_000 });
+    const { source, runtime, clock, controller } = poolController({
+      poolCap: 3,
+      idleTtlMs: 1_000,
+    });
     const rt = runtime as InstantRuntime;
 
     source.openFile('a.html');
@@ -821,10 +856,10 @@ describe('PreviewController — startup progress', () => {
     async ensureRunning(
       courseRoot: string,
       onProgress?: (progress: PreviewStartupProgress) => void,
-    ): Promise<{ port: number }> {
+    ): Promise<{ port: number; previewSessionId: string }> {
       this.calls.push(courseRoot);
       for (const step of this.script) onProgress?.(step);
-      return { port: this.port };
+      return { port: this.port, previewSessionId: PREVIEW_SESSION_ID };
     }
     async stop(): Promise<void> {}
     async stopAll(): Promise<void> {
@@ -888,7 +923,7 @@ describe('PreviewController — startup progress', () => {
 
   it('drops a superseded cold start’s late progress instead of painting over newer state', async () => {
     const progressFns: Array<((progress: PreviewStartupProgress) => void) | undefined> = [];
-    const resolvers: Array<(value: { port: number }) => void> = [];
+    const resolvers: Array<(value: { port: number; previewSessionId: string }) => void> = [];
     const runtime: ContainerRuntime = {
       async ensureRunning(_courseRoot, onProgress) {
         progressFns.push(onProgress);

@@ -57,7 +57,7 @@ export interface ContainerRuntime {
   ensureRunning(
     courseRoot: string,
     onProgress?: (progress: PreviewStartupProgress) => void,
-  ): Promise<{ port: number }>;
+  ): Promise<{ port: number; previewSessionId: string }>;
   /** Stop and remove the container for `courseRoot` (LRU eviction / idle reaping). */
   stop(courseRoot: string): Promise<void>;
   /** Stop every container the runtime started (window close / Stop preview servers). */
@@ -331,8 +331,9 @@ export class PreviewController {
       : undefined;
 
     let port: number;
+    let previewSessionId: string;
     try {
-      ({ port } = await this.runtime.ensureRunning(target.courseRoot, onProgress));
+      ({ port, previewSessionId } = await this.runtime.ensureRunning(target.courseRoot, onProgress));
     } catch (error) {
       // A superseded render (editor switched, refresh, or dispose) must not paint
       // its stale failure over the newer state.
@@ -347,7 +348,9 @@ export class PreviewController {
 
     // Superseded by a newer render (editor switched, refresh, or dispose)?
     if (this.disposed || token !== this.renderToken) {
-      this.log(`[render] ${target.qid}: superseded after container ready (token ${token}≠${this.renderToken}); dropped`);
+      this.log(
+        `[render] ${target.qid}: superseded after container ready (token ${token}≠${this.renderToken}); dropped`,
+      );
       return;
     }
 
@@ -356,7 +359,12 @@ export class PreviewController {
     this.markWarm(target.courseRoot);
 
     const variant = this.seedFor(target);
-    const url = buildPreviewUrl({ port, qid: target.qid, variant });
+    const url = buildPreviewUrl({
+      port,
+      previewSessionId,
+      qid: target.qid,
+      variant,
+    });
     this.log(`[render] ${target.qid}: showing preview ${url}`);
     this.sink.setState({ kind: 'preview', url, variant });
   }

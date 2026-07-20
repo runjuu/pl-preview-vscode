@@ -14,7 +14,8 @@ import type Docker from 'dockerode';
  * coordinated extension release rather than a silent drift. `resolvePreviewImage`
  * lets local development point at a self-built image.
  */
-export const DEFAULT_PREVIEW_IMAGE = 'ghcr.io/runjuu/prairielearn:sha-bfbe099@sha256:36a2e8959756d4ae76f102ebf45f4e362a936c35574203ee2af371e3f9775b99';
+export const DEFAULT_PREVIEW_IMAGE =
+  'ghcr.io/runjuu/prairielearn:sha-6fd23e1@sha256:d480645624195991e42197f9105ae1a818065ca58098da041a2a6403fde3862a';
 
 /** Environment override used to point the extension at a locally-built image. */
 export const PREVIEW_IMAGE_ENV_VAR = 'PL_PREVIEW_IMAGE';
@@ -27,8 +28,7 @@ export const PREVIEW_CONTAINER_PORT = 4310;
  * ships no ENTRYPOINT (its default `Cmd` boots full PrairieLearn), so we invoke
  * `node <this>` ourselves; bare flags would be exec'd as a binary.
  */
-export const PREVIEW_SERVER_ENTRYPOINT =
-  '/PrairieLearn/apps/prairielearn/dist/preview-server.js';
+export const PREVIEW_SERVER_ENTRYPOINT = '/PrairieLearn/apps/prairielearn/dist/preview-server.js';
 
 /** Path the course tree is bind-mounted at inside the container. */
 export const PREVIEW_COURSE_MOUNT = '/course';
@@ -109,6 +109,8 @@ export interface PreviewContainerSpecInput {
   courseRoot: string;
   /** Stable identifier for the course (used for the label and container name). */
   courseId: string;
+  /** Backend-only bearer credential protecting metadata and session management. */
+  authToken: string;
   /**
    * When set, the preview server can launch workspace-question containers. This
    * widens the container's privilege (a mounted runtime socket is host-root
@@ -122,9 +124,7 @@ export interface PreviewContainerSpecInput {
  * developer can render against a self-built image. A blank override is ignored,
  * so the pinned default is never accidentally cleared to an empty reference.
  */
-export function resolvePreviewImage(
-  env: Record<string, string | undefined> = process.env,
-): string {
+export function resolvePreviewImage(env: Record<string, string | undefined> = process.env): string {
   const override = env[PREVIEW_IMAGE_ENV_VAR]?.trim();
   return override ? override : DEFAULT_PREVIEW_IMAGE;
 }
@@ -152,7 +152,11 @@ export function parseImageReference(reference: string): ParsedImageReference {
   const lastSlash = nameAndTag.lastIndexOf('/');
   const lastColon = nameAndTag.lastIndexOf(':');
   if (lastColon > lastSlash) {
-    return { repo: nameAndTag.slice(0, lastColon), tag: nameAndTag.slice(lastColon + 1), digest };
+    return {
+      repo: nameAndTag.slice(0, lastColon),
+      tag: nameAndTag.slice(lastColon + 1),
+      digest,
+    };
   }
   return { repo: nameAndTag, digest };
 }
@@ -231,11 +235,7 @@ export function selectRemovablePreviewImages(
 }
 
 /** Prefer a git-sha tag, then a short repo digest, then the image id, for display. */
-function friendlyImageName(
-  repoTags: readonly string[],
-  repoDigests: readonly string[],
-  id: string,
-): string {
+function friendlyImageName(repoTags: readonly string[], repoDigests: readonly string[], id: string): string {
   for (const ref of repoTags) {
     const { tag } = parseImageReference(ref);
     if (tag) return tag;
@@ -280,21 +280,19 @@ export function formatBytes(bytes: number): string {
  * author's source, and the port is published on an ephemeral loopback host port
  * so a second course (or a real PrairieLearn) never collides on 4310.
  */
-export function buildPreviewContainerCreateOptions(
-  input: PreviewContainerSpecInput,
-): Docker.ContainerCreateOptions {
-  const { image, courseRoot, courseId, workspaces } = input;
+export function buildPreviewContainerCreateOptions(input: PreviewContainerSpecInput): Docker.ContainerCreateOptions {
+  const { image, courseRoot, courseId, authToken, workspaces } = input;
 
   const binds = [`${courseRoot}:${PREVIEW_COURSE_MOUNT}:ro`];
   const cmd = [
-    '--course-dir',
-    PREVIEW_COURSE_MOUNT,
     '--host',
     '0.0.0.0',
     '--port',
     String(PREVIEW_CONTAINER_PORT),
     '--workers-execution-mode',
     'native',
+    '--render-mode',
+    'full',
   ];
 
   const hostConfig: Docker.HostConfig = {
@@ -316,11 +314,7 @@ export function buildPreviewContainerCreateOptions(
     AutoRemove: true,
   };
 
-  if (workspaces == null) {
-    // No runtime access: disable the workspace manager so workspace questions
-    // render a clear "disabled" page instead of failing to launch a container.
-    cmd.push('--no-workspaces');
-  } else {
+  if (workspaces != null) {
     // Mount the runtime socket so the server can launch workspace containers as
     // siblings, join them on a shared network so it can reach them by alias, and
     // mount a daemon-managed named volume it populates with their home dirs (the
@@ -333,6 +327,7 @@ export function buildPreviewContainerCreateOptions(
       hostConfig.GroupAdd = [String(workspaces.socketGid)];
     }
     cmd.push(
+      '--workspaces',
       '--workspace-home-dir',
       PREVIEW_WORKSPACE_HOME_MOUNT,
       '--workspace-home-volume',
@@ -346,7 +341,7 @@ export function buildPreviewContainerCreateOptions(
     Image: image,
     User: PREVIEW_CONTAINER_USER,
     // Keep native Python from writing .pyc files onto the read-only rootfs.
-    Env: ['PYTHONDONTWRITEBYTECODE=1'],
+    Env: ['PYTHONDONTWRITEBYTECODE=1', `PRAIRIELEARN_PREVIEW_AUTH_TOKEN=${authToken}`],
     Entrypoint: ['node', PREVIEW_SERVER_ENTRYPOINT],
     Cmd: cmd,
     Labels: {

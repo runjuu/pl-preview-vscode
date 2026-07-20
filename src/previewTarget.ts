@@ -20,8 +20,18 @@ export const QUESTION_INFO_FILE = 'info.json';
 /** Directory under the course root that holds questions. */
 export const QUESTIONS_DIR = 'questions';
 
-/** The `info.json` `type` value of a v3/Freeform question — the only previewable kind. */
+/** The `info.json` `type` value of a v3/Freeform question. */
 export const FREEFORM_QUESTION_TYPE = 'v3';
+
+/** Every Source Question Type implemented by the `experimental-1` server. */
+export const SOURCE_QUESTION_TYPES = [
+  FREEFORM_QUESTION_TYPE,
+  'Calculation',
+  'MultipleChoice',
+  'Checkbox',
+  'File',
+  'MultipleTrueFalse',
+] as const;
 
 /** A resolved preview target: which course to mount and which qid to render. */
 export interface PreviewTarget {
@@ -31,8 +41,8 @@ export interface PreviewTarget {
   readonly qid: string;
   /**
    * The question's `info.json` `type`, or `undefined` when it is absent or the
-   * file could not be parsed. Drives the "not previewable for this type" state:
-   * only v3/Freeform questions render (see {@link isPreviewableType}).
+   * file could not be parsed. Drives the "not previewable for this type" state
+   * when a value is outside the six Source Question Types.
    */
   readonly type?: string;
   /**
@@ -44,16 +54,15 @@ export interface PreviewTarget {
 }
 
 /**
- * Whether a question of this `info.json` `type` can be previewed. Only v3/Freeform
- * (`type: "v3"`) is renderable by the preview server; legacy types (e.g.
- * `Calculation`) are shown as a friendly "not previewable" state instead.
+ * Whether a question of this `info.json` `type` can be previewed. The completed
+ * server supports Freeform plus all five native legacy Source Question Types.
  *
  * An `undefined` type (missing or unparseable `info.json`) is treated as
  * previewable so the render is still attempted — a genuine failure then surfaces
  * as the loud error state rather than being pre-emptively refused here.
  */
 export function isPreviewableType(type: string | undefined): boolean {
-  return type === undefined || type.toLowerCase() === FREEFORM_QUESTION_TYPE;
+  return type === undefined || SOURCE_QUESTION_TYPES.some((supported) => supported === type);
 }
 
 /**
@@ -116,9 +125,7 @@ export async function resolvePreviewTarget(
 
 /** The deepest workspace folder that contains `filePath`, if any. */
 function containingFolder(filePath: string, workspaceFolders: readonly string[]): string | undefined {
-  return workspaceFolders
-    .filter((folder) => isInside(folder, filePath))
-    .sort((a, b) => b.length - a.length)[0];
+  return workspaceFolders.filter((folder) => isInside(folder, filePath)).sort((a, b) => b.length - a.length)[0];
 }
 
 /** Walk up from `startDir` (inclusive) to `boundary` looking for `infoCourse.json`. */
@@ -158,7 +165,10 @@ async function resolveQid(
   let dir = path.dirname(activeFilePath);
   while (dir !== questionsRoot && isInside(questionsRoot, dir)) {
     if (await isFile(path.join(dir, QUESTION_INFO_FILE))) {
-      return { qid: path.relative(questionsRoot, dir).split(path.sep).join('/'), questionDir: dir };
+      return {
+        qid: path.relative(questionsRoot, dir).split(path.sep).join('/'),
+        questionDir: dir,
+      };
     }
     dir = path.dirname(dir);
   }

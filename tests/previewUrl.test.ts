@@ -1,12 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import {
-  DEFAULT_VARIANT,
-  buildPreviewUrl,
-  previewOrigin,
-  randomBase36Variant,
-} from '../src/previewUrl';
+import { DEFAULT_VARIANT, buildPreviewUrl, previewOrigin, randomBase36Variant } from '../src/previewUrl';
 
 describe('previewOrigin', () => {
   it('is the loopback origin for the published port', () => {
@@ -15,28 +10,45 @@ describe('previewOrigin', () => {
 });
 
 describe('buildPreviewUrl', () => {
-  it('points at the question render endpoint on the loopback origin', () => {
+  const previewSessionId = 'pvs_0123456789abcdefghijkl';
+
+  it('points at the session-scoped question endpoint on the loopback origin', () => {
     assert.equal(
-      buildPreviewUrl({ port: 49812, qid: 'arithmetic', variant: '1' }),
-      'http://127.0.0.1:49812/questions/arithmetic?variant=1',
+      buildPreviewUrl({
+        port: 49812,
+        previewSessionId: 'pvs_0123456789abcdefghijkl',
+        qid: 'arithmetic',
+        variant: '1',
+      }),
+      'http://127.0.0.1:49812/preview-sessions/pvs_0123456789abcdefghijkl/questions/arithmetic?variant=1',
     );
   });
 
   it('defaults to the stable variant seed', () => {
     assert.equal(
-      buildPreviewUrl({ port: 49812, qid: 'arithmetic' }),
-      `http://127.0.0.1:49812/questions/arithmetic?variant=${DEFAULT_VARIANT}`,
+      buildPreviewUrl({ port: 49812, previewSessionId, qid: 'arithmetic' }),
+      `http://127.0.0.1:49812/preview-sessions/${previewSessionId}/questions/arithmetic?variant=${DEFAULT_VARIANT}`,
     );
   });
 
   it('preserves the separators of a nested qid but encodes each segment', () => {
     assert.equal(
-      buildPreviewUrl({ port: 4310, qid: 'topic/sub/q1', variant: '1' }),
-      'http://127.0.0.1:4310/questions/topic/sub/q1?variant=1',
+      buildPreviewUrl({
+        port: 4310,
+        previewSessionId,
+        qid: 'topic/sub/q1',
+        variant: '1',
+      }),
+      `http://127.0.0.1:4310/preview-sessions/${previewSessionId}/questions/topic/sub/q1?variant=1`,
     );
     assert.equal(
-      buildPreviewUrl({ port: 4310, qid: 'a b/c+d', variant: '1' }),
-      'http://127.0.0.1:4310/questions/a%20b/c%2Bd?variant=1',
+      buildPreviewUrl({
+        port: 4310,
+        previewSessionId,
+        qid: 'a b/c+d',
+        variant: '1',
+      }),
+      `http://127.0.0.1:4310/preview-sessions/${previewSessionId}/questions/a%20b/c%2Bd?variant=1`,
     );
   });
 });

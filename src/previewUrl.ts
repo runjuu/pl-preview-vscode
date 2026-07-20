@@ -22,6 +22,8 @@ export function previewOrigin(port: number): string {
 export interface PreviewUrlInput {
   /** Published loopback host port of the container. */
   port: number;
+  /** Opaque Local Preview Session capability discovered through the control plane. */
+  previewSessionId: string;
   /** Question id, possibly nested (e.g. `topic/sub/q1`). */
   qid: string;
   /** Variant seed; defaults to {@link DEFAULT_VARIANT}. */
@@ -29,15 +31,20 @@ export interface PreviewUrlInput {
 }
 
 /**
- * Build `http://127.0.0.1:<port>/questions/<encoded-qid>?variant=<seed>`.
+ * Build the question URL below an opaque Local Preview Session capability.
  *
  * Each qid segment is percent-encoded so spaces and reserved characters are
  * safe, while the `/` separators of a nested qid are preserved as path
  * boundaries (matching the POC's `previewUrlForQid`).
  */
-export function buildPreviewUrl({ port, qid, variant = DEFAULT_VARIANT }: PreviewUrlInput): string {
+export function buildPreviewUrl({
+  port,
+  previewSessionId,
+  qid,
+  variant = DEFAULT_VARIANT,
+}: PreviewUrlInput): string {
   const encodedQid = qid.split('/').map(encodeURIComponent).join('/');
-  return `${previewOrigin(port)}/questions/${encodedQid}?variant=${encodeURIComponent(variant)}`;
+  return `${previewOrigin(port)}/preview-sessions/${encodeURIComponent(previewSessionId)}/questions/${encodedQid}?variant=${encodeURIComponent(variant)}`;
 }
 
 /**

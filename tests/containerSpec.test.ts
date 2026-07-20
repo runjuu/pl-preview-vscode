@@ -19,35 +19,37 @@ import {
 } from '../src/containerSpec';
 
 const courseRoot = '/Users/author/my-course';
+const authToken = 'extension-control-secret';
+const PINNED_PREVIEW_IMAGE =
+  'ghcr.io/runjuu/prairielearn:sha-6fd23e1@sha256:d480645624195991e42197f9105ae1a818065ca58098da041a2a6403fde3862a';
 
 function createOptions() {
   return buildPreviewContainerCreateOptions({
     image: DEFAULT_PREVIEW_IMAGE,
     courseRoot,
     courseId: 'my-course',
+    authToken,
   });
 }
 
 describe('buildPreviewContainerCreateOptions', () => {
-  it('boots the standalone preview server with the mandatory plain-container flags', () => {
+  it('boots the experimental-1 server in explicit full mode without removed flags', () => {
     const cmd = createOptions().Cmd ?? [];
 
     // Both flags are mandatory in a plain container: the defaults (loopback
     // bind, docker-in-docker "container" execution) silently break.
     assert.deepEqual(createOptions().Entrypoint, ['node', PREVIEW_SERVER_ENTRYPOINT]);
     assert.ok(adjacent(cmd, '--host', '0.0.0.0'), 'must pass --host 0.0.0.0');
+    assert.ok(adjacent(cmd, '--workers-execution-mode', 'native'), 'must pass --workers-execution-mode native');
+    assert.ok(!cmd.includes('--course-dir'), 'the extension creates its Local Preview Session at runtime');
+    assert.ok(adjacent(cmd, '--render-mode', 'full'), 'Preview Answer Check requires explicit full mode');
+    assert.ok(adjacent(cmd, '--port', String(PREVIEW_CONTAINER_PORT)), 'must listen on the exposed container port');
+    assert.ok(!cmd.includes('--no-workspaces'), 'the removed inverse workspace flag is never used');
+    assert.ok(!cmd.includes('--workspaces'), 'workspaces stay at the disabled server default');
     assert.ok(
-      adjacent(cmd, '--workers-execution-mode', 'native'),
-      'must pass --workers-execution-mode native',
+      createOptions().Env?.includes(`PRAIRIELEARN_PREVIEW_AUTH_TOKEN=${authToken}`),
+      'the optional control plane is authenticated with a backend-only environment secret',
     );
-    assert.ok(adjacent(cmd, '--course-dir', '/course'), 'must serve the mounted course dir');
-    assert.ok(
-      adjacent(cmd, '--port', String(PREVIEW_CONTAINER_PORT)),
-      'must listen on the exposed container port',
-    );
-    // With no runtime access granted, the server must not try to launch
-    // workspace containers it cannot create.
-    assert.ok(cmd.includes('--no-workspaces'), 'a jailed container disables workspaces');
   });
 
   it('bind-mounts the course read-only at the container course path', () => {
@@ -116,6 +118,7 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
       image: DEFAULT_PREVIEW_IMAGE,
       courseRoot,
       courseId: 'my-course',
+      authToken,
       workspaces,
     });
   }
@@ -142,7 +145,7 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
     assert.deepEqual(host.GroupAdd, ['20']);
   });
 
-  it('passes the fixed home mount, the named volume, and the network to the server, keeping workspaces on', () => {
+  it('passes the fixed home mount, the named volume, and the network to an explicitly workspace-enabled server', () => {
     const cmd = workspaceOptions().Cmd ?? [];
 
     assert.ok(
@@ -154,7 +157,8 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
       'the server needs the named volume so sibling containers mount its subpaths',
     );
     assert.ok(adjacent(cmd, '--workspace-network', workspaces.network));
-    assert.ok(!cmd.includes('--no-workspaces'), 'workspaces stay enabled');
+    assert.ok(cmd.includes('--workspaces'), 'Preview Workspaces are enabled explicitly');
+    assert.ok(!cmd.includes('--no-workspaces'));
   });
 
   it('keeps the container hardened even with runtime access', () => {
@@ -167,23 +171,27 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
   });
 
   it('omits the socket group when no gid is supplied', () => {
-    const host = buildPreviewContainerCreateOptions({
-      image: DEFAULT_PREVIEW_IMAGE,
-      courseRoot,
-      courseId: 'my-course',
-      workspaces: { ...workspaces, socketGid: undefined },
-    }).HostConfig ?? {};
+    const host =
+      buildPreviewContainerCreateOptions({
+        image: DEFAULT_PREVIEW_IMAGE,
+        courseRoot,
+        courseId: 'my-course',
+        authToken,
+        workspaces: { ...workspaces, socketGid: undefined },
+      }).HostConfig ?? {};
 
     assert.equal(host.GroupAdd, undefined);
   });
 
   it('grants group 0 for a Docker Desktop root:root socket (gid 0 is not "no gid")', () => {
-    const host = buildPreviewContainerCreateOptions({
-      image: DEFAULT_PREVIEW_IMAGE,
-      courseRoot,
-      courseId: 'my-course',
-      workspaces: { ...workspaces, socketGid: 0 },
-    }).HostConfig ?? {};
+    const host =
+      buildPreviewContainerCreateOptions({
+        image: DEFAULT_PREVIEW_IMAGE,
+        courseRoot,
+        courseId: 'my-course',
+        authToken,
+        workspaces: { ...workspaces, socketGid: 0 },
+      }).HostConfig ?? {};
 
     assert.deepEqual(host.GroupAdd, ['0']);
   });
@@ -192,15 +200,13 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
 describe('resolvePreviewImage', () => {
   it('defaults to a pinned reference, never :latest', () => {
     assert.equal(resolvePreviewImage({}), DEFAULT_PREVIEW_IMAGE);
+    assert.equal(DEFAULT_PREVIEW_IMAGE, PINNED_PREVIEW_IMAGE);
     assert.doesNotMatch(DEFAULT_PREVIEW_IMAGE, /:latest$/);
     assert.match(DEFAULT_PREVIEW_IMAGE, /:/, 'the reference must carry an explicit tag or digest');
   });
 
   it('honours a local PL_PREVIEW_IMAGE override for development', () => {
-    assert.equal(
-      resolvePreviewImage({ PL_PREVIEW_IMAGE: 'my/local-pl:dev' }),
-      'my/local-pl:dev',
-    );
+    assert.equal(resolvePreviewImage({ PL_PREVIEW_IMAGE: 'my/local-pl:dev' }), 'my/local-pl:dev');
   });
 
   it('ignores a blank override', () => {

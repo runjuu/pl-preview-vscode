@@ -8,11 +8,7 @@ import path from 'node:path';
 import Docker from 'dockerode';
 import * as vscode from 'vscode';
 
-import {
-  type RemovablePreviewImage,
-  formatBytes,
-  resolvePreviewImage,
-} from './containerSpec';
+import { type RemovablePreviewImage, formatBytes, resolvePreviewImage } from './containerSpec';
 import { DockerPreviewRuntime, type PreviewWorkspaceSupport } from './dockerRuntime';
 import {
   DELETE_OLD_IMAGES_COMMAND,
@@ -41,13 +37,13 @@ import {
   type PreviewViewState,
 } from './previewController';
 import { PreviewProxy } from './previewProxy';
-import { PREVIEWABLE_CONTEXT_KEY, PreviewabilityWatcher } from './previewability';
 import {
-  type RuntimeAvailability,
-  classifyRuntimeProbe,
-  detectCli,
-  runtimeRemediation,
-} from './runtimeDetection';
+  type PreviewWorkspaceRoute,
+  buildPreviewWorkspaceControlUrl,
+  parsePreviewWorkspaceUrl,
+} from './previewWorkspaceUrl';
+import { PREVIEWABLE_CONTEXT_KEY, PreviewabilityWatcher } from './previewability';
+import { type RuntimeAvailability, classifyRuntimeProbe, detectCli, runtimeRemediation } from './runtimeDetection';
 import {
   type ContainerRuntimeProfile,
   type EndpointContext,
@@ -55,11 +51,7 @@ import {
   type RuntimeStartAction,
   dockerodeOptionsForEndpoint,
 } from './runtimeProfiles';
-import {
-  type RuntimeCandidate,
-  type RuntimeConfig,
-  resolveRuntimeSelection,
-} from './runtimeResolution';
+import { type RuntimeCandidate, type RuntimeConfig, resolveRuntimeSelection } from './runtimeResolution';
 import { describeStartupProgress } from './startupProgress';
 
 /**
@@ -117,9 +109,7 @@ class VscodeEditorWorkspaceSource implements EditorWorkspaceSource {
     return vscode.workspace.onDidSaveTextDocument((document) => {
       // Log every save the editor reports (even non-`file` ones we drop) so a
       // "save didn't refresh" report can be traced from the very first event.
-      getOutput().appendLine(
-        `[event] onDidSaveTextDocument (${document.uri.scheme}) ${document.uri.fsPath}`,
-      );
+      getOutput().appendLine(`[event] onDidSaveTextDocument (${document.uri.scheme}) ${document.uri.fsPath}`);
       if (document.uri.scheme === 'file') {
         listener(document.uri.fsPath);
       }
@@ -222,11 +212,9 @@ class WebviewPreviewSink implements PreviewViewSink {
       case 'error':
         this.showDocument(errorPanelHtml(state.message));
         // Fail loudly with a one-click path to the traceback in the Output channel.
-        void vscode.window
-          .showErrorMessage(`PrairieLearn Preview: ${state.message}`, 'Show logs')
-          .then((choice) => {
-            if (choice === 'Show logs') this.output.show(true);
-          });
+        void vscode.window.showErrorMessage(`PrairieLearn Preview: ${state.message}`, 'Show logs').then((choice) => {
+          if (choice === 'Show logs') this.output.show(true);
+        });
         return;
       case 'preview':
         void this.showPreview(state);
@@ -378,23 +366,13 @@ function ensurePanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
   return panel;
 }
 
-function openWorkspacePanel(
-  context: vscode.ExtensionContext,
-  rawUrl: string,
-  questionName?: string,
-): void {
-  let url: URL;
-  try {
-    url = new URL(rawUrl);
-  } catch {
-    void vscode.window.showErrorMessage('PrairieLearn Preview: Could not open workspace: invalid URL.');
-    return;
-  }
-
-  if (!isLoopbackWorkspaceUrl(url)) {
+function openWorkspacePanel(context: vscode.ExtensionContext, rawUrl: string, questionName?: string): void {
+  const workspaceRoute = parsePreviewWorkspaceUrl(rawUrl);
+  if (!workspaceRoute) {
     void vscode.window.showErrorMessage('PrairieLearn Preview: Could not open workspace: unexpected URL.');
     return;
   }
+  const url = new URL(rawUrl);
 
   const port = Number(url.port);
   if (!Number.isInteger(port) || port <= 0) {
@@ -402,11 +380,7 @@ function openWorkspacePanel(
     return;
   }
 
-  const id = url.pathname.match(/\/workspace\/([^/?#]+)\/?$/)?.[1];
-  if (!id) {
-    void vscode.window.showErrorMessage('PrairieLearn Preview: Could not open workspace: missing workspace id.');
-    return;
-  }
+  const id = workspaceRoute.workspaceId;
 
   // Open the workspace as a sibling tab in the preview's own column rather than
   // `ViewColumn.Beside`: the preview tab is active when "Open workspace" is
@@ -433,12 +407,14 @@ function openWorkspacePanel(
 
   // The control bar (status + Reboot/Reset) posts back here; host→webview status and
   // reload messages carry this token so the webview rejects anything else.
-  const origin = url.origin;
   const hostMessageToken = randomMessageToken();
   let reloadNonce = 0;
 
   workspacePanels.set(key, workspacePanel);
-  workspacePanel.webview.html = workspacePanelHtml({ src: key, hostMessageToken });
+  workspacePanel.webview.html = workspacePanelHtml({
+    src: key,
+    hostMessageToken,
+  });
 
   workspacePanel.webview.onDidReceiveMessage(
     async (message: { type?: string } | undefined) => {
@@ -468,7 +444,7 @@ function openWorkspacePanel(
       );
       if (choice !== confirm.label) return;
 
-      const ok = await postWorkspaceAction(origin, id, action);
+      const ok = await postWorkspaceAction(workspaceRoute, action);
       if (!ok) {
         void vscode.window.showErrorMessage(`PrairieLearn Preview: ${confirm.label} failed.`);
         return;
@@ -493,7 +469,7 @@ function openWorkspacePanel(
   // window — the inner iframe already sends its own visibility-gated heartbeat.
   const statusTimer = setInterval(() => {
     if (!workspacePanel.visible) return;
-    void getWorkspaceStatus(origin, id).then((status) => {
+    void getWorkspaceStatus(workspaceRoute).then((status) => {
       if (!status) return;
       void workspacePanel.webview.postMessage({
         message: status.message,
@@ -514,14 +490,6 @@ function openWorkspacePanel(
   );
 }
 
-function isLoopbackWorkspaceUrl(url: URL): boolean {
-  return (
-    url.protocol === 'http:' &&
-    (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]') &&
-    /(^|\/)workspace\/[^/?#]+\/?$/.test(url.pathname)
-  );
-}
-
 function randomMessageToken(): string {
   return randomBytes(16).toString('hex');
 }
@@ -534,21 +502,13 @@ const WORKSPACE_STATUS_TIMEOUT_MS = 4000;
  * true on a 2xx, false on any non-2xx / network error / timeout — the caller surfaces the
  * failure and skips the reload.
  */
-function postWorkspaceAction(
-  origin: string,
-  id: string,
-  action: 'reboot' | 'reset',
-): Promise<boolean> {
+function postWorkspaceAction(route: PreviewWorkspaceRoute, action: 'reboot' | 'reset'): Promise<boolean> {
   return new Promise((resolve) => {
-    const req = http.request(
-      `${origin}/workspace/${id}/${action}`,
-      { method: 'POST' },
-      (res) => {
-        res.resume();
-        const status = res.statusCode ?? 0;
-        resolve(status >= 200 && status < 300);
-      },
-    );
+    const req = http.request(buildPreviewWorkspaceControlUrl(route, action), { method: 'POST' }, (res) => {
+      res.resume();
+      const status = res.statusCode ?? 0;
+      resolve(status >= 200 && status < 300);
+    });
     req.setTimeout(WORKSPACE_ACTION_TIMEOUT_MS, () => {
       req.destroy();
       resolve(false);
@@ -562,12 +522,9 @@ function postWorkspaceAction(
  * GET the workspace status JSON over loopback for the control-bar poll. Resolves null on
  * any non-200 / parse / network error / timeout, so a transient blip just skips one tick.
  */
-function getWorkspaceStatus(
-  origin: string,
-  id: string,
-): Promise<{ message: string; state: string } | null> {
+function getWorkspaceStatus(route: PreviewWorkspaceRoute): Promise<{ message: string; state: string } | null> {
   return new Promise((resolve) => {
-    const req = http.get(`${origin}/workspace/${id}/status`, (res) => {
+    const req = http.get(buildPreviewWorkspaceControlUrl(route, 'status'), (res) => {
       if (res.statusCode !== 200) {
         res.resume();
         resolve(null);
@@ -580,7 +537,10 @@ function getWorkspaceStatus(
       });
       res.on('end', () => {
         try {
-          const parsed = JSON.parse(body) as { message?: unknown; state?: unknown };
+          const parsed = JSON.parse(body) as {
+            message?: unknown;
+            state?: unknown;
+          };
           if (typeof parsed.state === 'string' && typeof parsed.message === 'string') {
             resolve({ message: parsed.message, state: parsed.state });
           } else {
@@ -624,7 +584,10 @@ function readRuntimeConfig(): RuntimeConfig {
   const config = vscode.workspace.getConfiguration('plPreview');
   const setting = config.get<string>('containerRuntime', 'auto');
   const runtime = (['auto', 'docker', 'podman', 'custom'] as const).find((id) => id === setting) ?? 'auto';
-  return { runtime, containerHost: config.get<string>('containerHost', '') ?? '' };
+  return {
+    runtime,
+    containerHost: config.get<string>('containerHost', '') ?? '',
+  };
 }
 
 /** The host facts the pure runtime-resolution logic reads. */
@@ -645,7 +608,10 @@ async function probeCandidate(candidate: RuntimeCandidate): Promise<RuntimeAvail
     await client.ping();
     return { kind: 'available' };
   } catch (pingError) {
-    return classifyRuntimeProbe({ pingError, cliDetected: detectCli(candidate.profile.cliNames) });
+    return classifyRuntimeProbe({
+      pingError,
+      cliDetected: detectCli(candidate.profile.cliNames),
+    });
   }
 }
 
@@ -703,10 +669,14 @@ function computeWorkspaceSupport(endpoint: RuntimeEndpoint): WorkspaceSupportDec
     return { disabledReason: 'this workspace is not trusted' };
   }
   if (endpoint.kind !== 'socket') {
-    return { disabledReason: 'the container runtime is not reachable over a local socket' };
+    return {
+      disabledReason: 'the container runtime is not reachable over a local socket',
+    };
   }
   if (!vscode.workspace.getConfiguration('plPreview').get<boolean>('enableWorkspaces', true)) {
-    return { disabledReason: 'turned off via the plPreview.enableWorkspaces setting' };
+    return {
+      disabledReason: 'turned off via the plPreview.enableWorkspaces setting',
+    };
   }
   return {
     support: {
@@ -868,7 +838,10 @@ async function ensureRuntimeReady(): Promise<boolean> {
  * "Start …" action (the latter only surfaced where we know how to start it).
  */
 async function handleUnavailable(
-  selection: { readonly candidate: RuntimeCandidate; readonly availability: RuntimeAvailability },
+  selection: {
+    readonly candidate: RuntimeCandidate;
+    readonly availability: RuntimeAvailability;
+  },
   ctx: EndpointContext,
 ): Promise<boolean> {
   const { candidate, availability } = selection;
@@ -946,9 +919,7 @@ async function launchRuntimeAndWait(action: RuntimeStartAction, candidate: Runti
   return waitForRuntimeAfterLaunch(candidate);
 }
 
-type RuntimeLaunchResult =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly detail: string };
+type RuntimeLaunchResult = { readonly ok: true } | { readonly ok: false; readonly detail: string };
 
 /**
  * Spawn the runtime's start action. Two shapes, per {@link RuntimeStartAction.mode}:
@@ -989,7 +960,10 @@ function startRuntimeProcess(action: RuntimeStartAction): Promise<RuntimeLaunchR
           return;
         }
         const detail = code === null ? `signal ${signal ?? 'unknown'}` : `exit code ${code}`;
-        settle({ ok: false, detail: `${action.command} exited with ${detail}` });
+        settle({
+          ok: false,
+          detail: `${action.command} exited with ${detail}`,
+        });
       });
       child.once('spawn', () => {
         if (action.mode === 'launchApp') {
@@ -1001,7 +975,10 @@ function startRuntimeProcess(action: RuntimeStartAction): Promise<RuntimeLaunchR
       });
       child.unref();
     } catch (error) {
-      settle({ ok: false, detail: error instanceof Error ? error.message : String(error) });
+      settle({
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 }

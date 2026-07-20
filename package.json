@@ -153,6 +153,7 @@
     "watch": "pnpm run bundle -- --watch",
     "typecheck": "tsc -p ./tsconfig.json",
     "test": "tsx --test tests/*.test.ts",
+    "test:contract": "tsx --test tests/previewServer.integration.test.ts",
     "update-image": "node scripts/update-preview-image.mjs",
     "test:coverage": "c8 node --import tsx --test tests/*.test.ts",
     "release:check": "pnpm run typecheck && pnpm run test && pnpm run build",

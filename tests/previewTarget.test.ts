@@ -27,10 +27,7 @@ async function makeCourse(options: {
   for (const qid of options.questions) {
     const questionDir = path.join(courseRoot, 'questions', ...qid.split('/'));
     await fs.mkdir(questionDir, { recursive: true });
-    await fs.writeFile(
-      path.join(questionDir, 'info.json'),
-      JSON.stringify({ title: `Title of ${qid}`, type: 'v3' }),
-    );
+    await fs.writeFile(path.join(questionDir, 'info.json'), JSON.stringify({ title: `Title of ${qid}`, type: 'v3' }));
     await fs.writeFile(path.join(questionDir, 'question.html'), '<pl-question-panel></pl-question-panel>');
     await fs.writeFile(path.join(questionDir, 'server.py'), 'def generate(data):\n    pass\n');
   }
@@ -76,10 +73,7 @@ describe('resolvePreviewTarget', () => {
 
   it('resolves a question from any of its files', async () => {
     for (const file of ['question.html', 'server.py', 'info.json']) {
-      const target = await resolvePreviewTarget(
-        path.join(courseRoot, 'questions', 'arithmetic', file),
-        [courseRoot],
-      );
+      const target = await resolvePreviewTarget(path.join(courseRoot, 'questions', 'arithmetic', file), [courseRoot]);
       assert.deepEqual(target, {
         courseRoot,
         qid: 'arithmetic',
@@ -118,10 +112,9 @@ describe('resolvePreviewTarget', () => {
   it('walks up to the nearest ancestor infoCourse.json when the workspace is the repo root', async () => {
     // The workspace folder is a parent of the course, mirroring a multi-course repo.
     const repoRoot = path.dirname(courseRoot);
-    const target = await resolvePreviewTarget(
-      path.join(courseRoot, 'questions', 'arithmetic', 'server.py'),
-      [repoRoot],
-    );
+    const target = await resolvePreviewTarget(path.join(courseRoot, 'questions', 'arithmetic', 'server.py'), [
+      repoRoot,
+    ]);
     assert.deepEqual(target, {
       courseRoot,
       qid: 'arithmetic',
@@ -131,10 +124,9 @@ describe('resolvePreviewTarget', () => {
   });
 
   it('returns null for a course-level file outside questions/ (e.g. an element)', async () => {
-    const target = await resolvePreviewTarget(
-      path.join(courseRoot, 'elements', 'pl-thing', 'pl-thing.py'),
-      [courseRoot],
-    );
+    const target = await resolvePreviewTarget(path.join(courseRoot, 'elements', 'pl-thing', 'pl-thing.py'), [
+      courseRoot,
+    ]);
     assert.equal(target, null);
   });
 
@@ -143,35 +135,34 @@ describe('resolvePreviewTarget', () => {
   });
 
   it('returns null when no ancestor infoCourse.json exists', async () => {
-    const orphan = await makeCourse({ questions: ['arithmetic'], withoutCourseInfo: true });
-    const target = await resolvePreviewTarget(
-      path.join(orphan, 'questions', 'arithmetic', 'server.py'),
-      [orphan],
-    );
+    const orphan = await makeCourse({
+      questions: ['arithmetic'],
+      withoutCourseInfo: true,
+    });
+    const target = await resolvePreviewTarget(path.join(orphan, 'questions', 'arithmetic', 'server.py'), [orphan]);
     assert.equal(target, null);
   });
 
   it('returns null when the file is not inside any workspace folder', async () => {
     const elsewhere = await makeCourse({ questions: ['arithmetic'] });
-    const target = await resolvePreviewTarget(
-      path.join(elsewhere, 'questions', 'arithmetic', 'server.py'),
-      [courseRoot],
-    );
+    const target = await resolvePreviewTarget(path.join(elsewhere, 'questions', 'arithmetic', 'server.py'), [
+      courseRoot,
+    ]);
     assert.equal(target, null);
   });
 });
 
 describe('isPreviewableType', () => {
-  it('accepts the v3/Freeform type (case-insensitively) and an unknown/undefined type', () => {
-    assert.equal(isPreviewableType('v3'), true);
-    assert.equal(isPreviewableType('V3'), true);
+  it('accepts all six Source Question Types and an unknown/undefined type', () => {
+    for (const type of ['v3', 'Calculation', 'MultipleChoice', 'Checkbox', 'File', 'MultipleTrueFalse']) {
+      assert.equal(isPreviewableType(type), true, `${type} is supported by experimental-1`);
+    }
     // An undetermined type is attempted rather than pre-emptively refused.
     assert.equal(isPreviewableType(undefined), true);
   });
 
-  it('refuses a known legacy (non-v3) type so it is not rendered as v3', () => {
-    assert.equal(isPreviewableType('Calculation'), false);
-    assert.equal(isPreviewableType('MultipleChoice'), false);
+  it('refuses a type outside the Standalone Preview Server contract', () => {
+    assert.equal(isPreviewableType('ExternalCustomType'), false);
   });
 });
 
@@ -190,70 +181,46 @@ describe('resolvePreviewTarget — question type', () => {
 
   it('surfaces the info.json type for a v3 (Freeform) question', async () => {
     const root = await courseWithQuestion('arithmetic', JSON.stringify({ type: 'v3' }));
-    const target = await resolvePreviewTarget(
-      path.join(root, 'questions', 'arithmetic', 'question.html'),
-      [root],
-    );
+    const target = await resolvePreviewTarget(path.join(root, 'questions', 'arithmetic', 'question.html'), [root]);
     assert.equal(target?.type, 'v3');
   });
 
-  it('surfaces a legacy (non-v3) type so the controller can refuse to render it', async () => {
+  it('surfaces a legacy Source Question Type so the controller can render it natively', async () => {
     const root = await courseWithQuestion('legacy', JSON.stringify({ type: 'Calculation' }));
-    const target = await resolvePreviewTarget(
-      path.join(root, 'questions', 'legacy', 'info.json'),
-      [root],
-    );
+    const target = await resolvePreviewTarget(path.join(root, 'questions', 'legacy', 'info.json'), [root]);
     assert.equal(target?.type, 'Calculation');
   });
 
   it('leaves the type undefined when info.json omits it', async () => {
     const root = await courseWithQuestion('untyped', JSON.stringify({ title: 'no type here' }));
-    const target = await resolvePreviewTarget(
-      path.join(root, 'questions', 'untyped', 'question.html'),
-      [root],
-    );
+    const target = await resolvePreviewTarget(path.join(root, 'questions', 'untyped', 'question.html'), [root]);
     assert.equal(target?.qid, 'untyped');
     assert.equal(target?.type, undefined);
   });
 
   it('leaves the type undefined when info.json is unparseable', async () => {
     const root = await courseWithQuestion('broken', '{ this is not json');
-    const target = await resolvePreviewTarget(
-      path.join(root, 'questions', 'broken', 'question.html'),
-      [root],
-    );
+    const target = await resolvePreviewTarget(path.join(root, 'questions', 'broken', 'question.html'), [root]);
     assert.equal(target?.qid, 'broken');
     assert.equal(target?.type, undefined);
   });
 
   it('surfaces the info.json title so the panel tab can name the question', async () => {
-    const root = await courseWithQuestion(
-      'arithmetic',
-      JSON.stringify({ title: 'Random arithmetic', type: 'v3' }),
-    );
-    const target = await resolvePreviewTarget(
-      path.join(root, 'questions', 'arithmetic', 'question.html'),
-      [root],
-    );
+    const root = await courseWithQuestion('arithmetic', JSON.stringify({ title: 'Random arithmetic', type: 'v3' }));
+    const target = await resolvePreviewTarget(path.join(root, 'questions', 'arithmetic', 'question.html'), [root]);
     assert.equal(target?.title, 'Random arithmetic');
   });
 
   it('leaves the title undefined when info.json omits it', async () => {
     const root = await courseWithQuestion('untitled', JSON.stringify({ type: 'v3' }));
-    const target = await resolvePreviewTarget(
-      path.join(root, 'questions', 'untitled', 'question.html'),
-      [root],
-    );
+    const target = await resolvePreviewTarget(path.join(root, 'questions', 'untitled', 'question.html'), [root]);
     assert.equal(target?.qid, 'untitled');
     assert.equal(target?.title, undefined);
   });
 
   it('leaves the title undefined when info.json is unparseable', async () => {
     const root = await courseWithQuestion('broken', '{ this is not json');
-    const target = await resolvePreviewTarget(
-      path.join(root, 'questions', 'broken', 'question.html'),
-      [root],
-    );
+    const target = await resolvePreviewTarget(path.join(root, 'questions', 'broken', 'question.html'), [root]);
     assert.equal(target?.title, undefined);
   });
 });

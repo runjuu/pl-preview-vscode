@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import http from 'node:http';
 import path from 'node:path';
 
@@ -5,6 +6,7 @@ import Docker from 'dockerode';
 
 import {
   PREVIEW_LABEL,
+  PREVIEW_COURSE_MOUNT,
   PREVIEW_WORKSPACE_CONTAINER_LABEL,
   PREVIEW_WORKSPACE_HOME_MOUNT,
   PREVIEW_WORKSPACE_HOME_ROOT_LABEL,
@@ -26,6 +28,7 @@ import {
   formatPullStatus,
 } from './runtimeDetection';
 import { previewOrigin } from './previewUrl';
+import { deleteLocalPreviewSession, discoverLocalPreviewSession } from './previewServerContract';
 import { previewImageVersion, type PreviewStartupProgress } from './startupProgress';
 
 /**
@@ -59,7 +62,7 @@ export interface PreviewRuntime {
   ensureRunning(
     courseRoot: string,
     onProgress?: (progress: PreviewStartupProgress) => void,
-  ): Promise<{ port: number }>;
+  ): Promise<{ port: number; previewSessionId: string }>;
   /** Stop and remove the container for a single course (LRU eviction / idle reaping). */
   stop(courseRoot: string): Promise<void>;
   /** Stop every container this runtime started. */
@@ -122,6 +125,12 @@ const STOP_TIMEOUT_SECONDS = 10;
 interface RunningContainer {
   container: Docker.Container;
   port: number;
+  previewSessionId: string;
+}
+
+interface CreatedContainer {
+  container: Docker.Container;
+  workspacesEnabled: boolean;
 }
 
 export class DockerPreviewRuntime implements PreviewRuntime {
@@ -131,6 +140,8 @@ export class DockerPreviewRuntime implements PreviewRuntime {
   private readonly cliNames: readonly string[];
   private readonly log: (line: string) => void;
   private readonly workspaces: PreviewWorkspaceSupport | undefined;
+  /** Optional control-plane credential, retained only in the extension host. */
+  private readonly authToken = randomBytes(32).toString('base64url');
   private readonly running = new Map<string, RunningContainer>();
   /**
    * Cached daemon capability check: whether the Engine supports per-workspace
@@ -160,30 +171,49 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       await this.docker.ping();
       return { kind: 'available' };
     } catch (pingError) {
-      return classifyRuntimeProbe({ pingError, cliDetected: detectCli(this.cliNames) });
+      return classifyRuntimeProbe({
+        pingError,
+        cliDetected: detectCli(this.cliNames),
+      });
     }
   }
 
   async ensureRunning(
     courseRoot: string,
     onProgress?: (progress: PreviewStartupProgress) => void,
-  ): Promise<{ port: number }> {
+  ): Promise<{ port: number; previewSessionId: string }> {
     const existing = this.running.get(courseRoot);
     if (existing) {
-      return { port: existing.port };
+      return {
+        port: existing.port,
+        previewSessionId: existing.previewSessionId,
+      };
     }
 
-    const container = await this.createContainer(courseRoot, onProgress);
+    const { container, workspacesEnabled } = await this.createContainer(courseRoot, onProgress);
     try {
-      onProgress?.({ phase: 'startingContainer', imageVersion: this.imageVersion });
+      onProgress?.({
+        phase: 'startingContainer',
+        imageVersion: this.imageVersion,
+      });
       await container.start();
       this.streamLogs(container);
       const inspect = await container.inspect();
       const port = resolvePublishedPort(inspect as unknown as PreviewContainerInspect);
       await this.waitForReady(port, onProgress);
-      this.running.set(courseRoot, { container, port });
-      this.log(`[pl-preview] preview ready for ${courseRoot} on 127.0.0.1:${port}`);
-      return { port };
+      const session = await discoverLocalPreviewSession({
+        origin: previewOrigin(port),
+        courseDir: PREVIEW_COURSE_MOUNT,
+        authToken: this.authToken,
+        requireWorkspaces: workspacesEnabled,
+      });
+      this.running.set(courseRoot, {
+        container,
+        port,
+        previewSessionId: session.previewSessionId,
+      });
+      this.log(`[pl-preview] preview ready for ${courseRoot} on 127.0.0.1:${port} (${session.previewSessionId})`);
+      return { port, previewSessionId: session.previewSessionId };
     } catch (error) {
       await this.forceRemove(container);
       throw error;
@@ -196,6 +226,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       return;
     }
     this.running.delete(courseRoot);
+    await this.deleteSession(running);
     await this.gracefulRemove(running.container);
     await this.cleanupWorkspaceSupport(courseRoot);
   }
@@ -204,6 +235,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
     const courseRoots = [...this.running.keys()];
     const containers = [...this.running.values()];
     this.running.clear();
+    await Promise.all(containers.map((running) => this.deleteSession(running)));
     await Promise.all(containers.map(({ container }) => this.gracefulRemove(container)));
     await Promise.all(courseRoots.map((courseRoot) => this.cleanupWorkspaceSupport(courseRoot)));
   }
@@ -227,29 +259,35 @@ export class DockerPreviewRuntime implements PreviewRuntime {
   private async createContainer(
     courseRoot: string,
     onProgress?: (progress: PreviewStartupProgress) => void,
-  ): Promise<Docker.Container> {
+  ): Promise<CreatedContainer> {
+    const workspaces = await this.prepareWorkspaceSupport(courseRoot, onProgress);
     const options = buildPreviewContainerCreateOptions({
       image: this.image,
       courseRoot,
       courseId: previewCourseId(courseRoot),
-      workspaces: await this.prepareWorkspaceSupport(courseRoot, onProgress),
+      authToken: this.authToken,
+      workspaces,
     });
 
     try {
-      return await this.docker.createContainer(options);
+      return {
+        container: await this.docker.createContainer(options),
+        workspacesEnabled: workspaces != null,
+      };
     } catch (error) {
       if (!isNoSuchImage(error)) {
         throw error;
       }
       this.log(`[pl-preview] pulling ${this.image} (first use)…`);
       await this.pullImage(onProgress);
-      return this.docker.createContainer(options);
+      return {
+        container: await this.docker.createContainer(options),
+        workspacesEnabled: workspaces != null,
+      };
     }
   }
 
-  private async pullImage(
-    onProgress?: (progress: PreviewStartupProgress) => void,
-  ): Promise<void> {
+  private async pullImage(onProgress?: (progress: PreviewStartupProgress) => void): Promise<void> {
     const aggregate = new PullProgressAggregator();
     const stream = await this.docker.pull(this.image);
     await new Promise<void>((resolve, reject) => {
@@ -281,11 +319,8 @@ export class DockerPreviewRuntime implements PreviewRuntime {
     });
   }
 
-  /** Poll `GET /` until the preview server answers any HTTP response. */
-  private async waitForReady(
-    port: number,
-    onProgress?: (progress: PreviewStartupProgress) => void,
-  ): Promise<void> {
+  /** Poll the public health endpoint until it returns the stable ready response. */
+  private async waitForReady(port: number, onProgress?: (progress: PreviewStartupProgress) => void): Promise<void> {
     const origin = previewOrigin(port);
     const timeoutMs = READINESS_ATTEMPTS * READINESS_INTERVAL_MS;
     for (let attempt = 0; attempt < READINESS_ATTEMPTS; attempt += 1) {
@@ -301,6 +336,21 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       await delay(READINESS_INTERVAL_MS);
     }
     throw new Error(`Preview server on ${origin} did not become ready in time`);
+  }
+
+  /** Best-effort explicit ownership cleanup; process shutdown remains the fallback. */
+  private async deleteSession(running: RunningContainer): Promise<void> {
+    try {
+      await deleteLocalPreviewSession({
+        origin: previewOrigin(running.port),
+        previewSessionId: running.previewSessionId,
+        authToken: this.authToken,
+      });
+    } catch (error) {
+      this.log(
+        `[pl-preview] could not delete ${running.previewSessionId} before container stop: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private streamLogs(container: Docker.Container): void {
@@ -378,7 +428,10 @@ export class DockerPreviewRuntime implements PreviewRuntime {
     await this.ensureNetwork(network);
     // createVolume is idempotent: it returns the existing volume for a name that
     // already exists rather than erroring, so a warm re-open just reuses it.
-    await this.docker.createVolume({ Name: volumeName, Labels: { [PREVIEW_LABEL]: 'true' } });
+    await this.docker.createVolume({
+      Name: volumeName,
+      Labels: { [PREVIEW_LABEL]: 'true' },
+    });
     await this.chownVolumeRoot(volumeName, onProgress);
 
     return {
@@ -410,7 +463,10 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       // leak this throwaway container: the daemon reaps it on exit, and the label
       // lets any future reconciliation find it.
       Labels: { [PREVIEW_LABEL]: 'true' },
-      HostConfig: { Binds: [`${volume}:${PREVIEW_WORKSPACE_HOME_MOUNT}`], AutoRemove: true },
+      HostConfig: {
+        Binds: [`${volume}:${PREVIEW_WORKSPACE_HOME_MOUNT}`],
+        AutoRemove: true,
+      },
     };
 
     let container: Docker.Container;
@@ -452,7 +508,9 @@ export class DockerPreviewRuntime implements PreviewRuntime {
   private async supportsWorkspaceVolumes(): Promise<boolean> {
     if (this.workspaceVolumesSupported === undefined) {
       try {
-        const version = (await this.docker.version()) as { ApiVersion?: string };
+        const version = (await this.docker.version()) as {
+          ApiVersion?: string;
+        };
         this.workspaceVolumesSupported = apiVersionAtLeast(version.ApiVersion, MIN_SUBPATH_API_VERSION);
       } catch {
         this.workspaceVolumesSupported = false;
@@ -555,9 +613,19 @@ function isConflict(error: unknown): boolean {
 
 function probe(origin: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const req = http.get(`${origin}/`, (res) => {
-      res.resume();
-      resolve(true);
+    const req = http.get(`${origin}/health`, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+      res.on('end', () => {
+        try {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+            status?: unknown;
+          };
+          resolve(res.statusCode === 200 && body.status === 'ok');
+        } catch {
+          resolve(false);
+        }
+      });
     });
     req.setTimeout(PROBE_TIMEOUT_MS, () => {
       req.destroy();
@@ -587,10 +655,7 @@ function isNoSuchContainer(error: unknown): boolean {
 const MIN_SUBPATH_API_VERSION: readonly [number, number] = [1, 45];
 
 /** True when a `major.minor` Docker API version string is >= the given floor. */
-function apiVersionAtLeast(
-  apiVersion: string | undefined,
-  [minMajor, minMinor]: readonly [number, number],
-): boolean {
+function apiVersionAtLeast(apiVersion: string | undefined, [minMajor, minMinor]: readonly [number, number]): boolean {
   if (!apiVersion) return false;
   const [major, minor] = apiVersion.split('.').map((part) => Number.parseInt(part, 10));
   if (!Number.isInteger(major) || !Number.isInteger(minor)) return false;
