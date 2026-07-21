@@ -19,7 +19,7 @@ afterEach(async () => {
 
 describe('Local Preview Extension ↔ pinned experimental-1 image', () => {
   it(
-    'creates and reuses a scoped full-mode session, renders current source, and cleans up',
+    'serves multiple scoped course sessions from one full-mode server and cleans up',
     {
       skip:
         pinnedImage == null ? 'set PL_PREVIEW_CONTRACT_IMAGE to a published image digest' : false,
@@ -33,7 +33,11 @@ describe('Local Preview Extension ↔ pinned experimental-1 image', () => {
       assert.doesNotMatch(pinnedImage!, /:latest(?:@|$)/);
 
       const courseRoot = await makeCourse('Initial experimental-1 render');
-      const runtime = new DockerPreviewRuntime({ image: pinnedImage });
+      const secondCourseRoot = await makeCourse('Second-course experimental-1 render');
+      const runtime = new DockerPreviewRuntime({
+        courseRoots: [courseRoot, secondCourseRoot],
+        image: pinnedImage,
+      });
       try {
         assert.deepEqual(await runtime.checkAvailability(), {
           kind: 'available',
@@ -41,6 +45,9 @@ describe('Local Preview Extension ↔ pinned experimental-1 image', () => {
         const first = await runtime.ensureRunning(courseRoot);
         const second = await runtime.ensureRunning(courseRoot);
         assert.deepEqual(second, first, 'warm reuse retains the owning Local Preview Session');
+        const otherCourse = await runtime.ensureRunning(secondCourseRoot);
+        assert.equal(otherCourse.port, first.port, 'both courses share one Standalone Preview Server');
+        assert.notEqual(otherCourse.previewSessionId, first.previewSessionId);
 
         const firstResponse = await fetch(
           buildPreviewUrl({ ...first, qid: 'freeform/v3', variant: '1' }),
@@ -64,6 +71,13 @@ describe('Local Preview Extension ↔ pinned experimental-1 image', () => {
         );
         assert.equal(refreshed.status, 200);
         assert.match(await refreshed.text(), /Refreshed experimental-1 render/);
+
+        await runtime.stop(courseRoot);
+        const otherResponse = await fetch(
+          buildPreviewUrl({ ...otherCourse, qid: 'freeform/v3', variant: '1' }),
+        );
+        assert.equal(otherResponse.status, 200);
+        assert.match(await otherResponse.text(), /Second-course experimental-1 render/);
       } finally {
         await runtime.stopAll();
       }

@@ -6,11 +6,12 @@ import Docker from 'dockerode';
 
 import {
   PREVIEW_LABEL,
-  PREVIEW_COURSE_MOUNT,
+  PREVIEW_COURSES_MOUNT,
   PREVIEW_WORKSPACE_CONTAINER_LABEL,
   PREVIEW_WORKSPACE_HOME_MOUNT,
   PREVIEW_WORKSPACE_HOME_ROOT_LABEL,
   buildPreviewContainerCreateOptions,
+  type PreviewCourseMount,
   type PreviewContainerInspect,
   type PreviewImageInfo,
   type PreviewWorkspaceContainerConfig,
@@ -40,10 +41,11 @@ import { previewImageVersion, type PreviewStartupProgress } from './startupProgr
  * the extension). The API is the same for every supported runtime (Docker,
  * Podman, and the Docker-socket-compatible engines), so this one adapter serves
  * all of them — the shell just injects a `docker` client built for the resolved
- * endpoint and the runtime's `cliNames`. It keys containers by course root and
- * exposes `ensureRunning` / `stop` / `stopAll`; the warm-pool *policy* (LRU cap,
- * idle reaping, dispose-all) lives in the `PreviewController`, which drives these
- * ports.
+ * endpoint and the runtime's `cliNames`. One container hosts one Standalone
+ * Preview Server; courses are independently mounted and registered as Local
+ * Preview Sessions. `stop(courseRoot)` closes only that session, while `stopAll`
+ * owns the server lifecycle. The session warm-pool *policy* (LRU cap, idle
+ * reaping, dispose-all) lives in the `PreviewController`.
  */
 
 /** How the extension observes and controls preview containers. */
@@ -55,7 +57,7 @@ export interface PreviewRuntime {
    */
   checkAvailability(): Promise<RuntimeAvailability>;
   /**
-   * Start (or reuse) the container for a course and return its loopback port,
+   * Start (or reuse) the shared server and the course's Local Preview Session,
    * reporting cold-start progress (pull → start → readiness) through `onProgress`
    * so the shell can drive the "Starting preview…" overview.
    */
@@ -63,9 +65,9 @@ export interface PreviewRuntime {
     courseRoot: string,
     onProgress?: (progress: PreviewStartupProgress) => void,
   ): Promise<{ port: number; previewSessionId: string }>;
-  /** Stop and remove the container for a single course (LRU eviction / idle reaping). */
+  /** Close one course's Local Preview Session (LRU eviction / idle reaping). */
   stop(courseRoot: string): Promise<void>;
-  /** Stop every container this runtime started. */
+  /** Close every session and stop the one server container. */
   stopAll(): Promise<void>;
   /**
    * List the superseded preview images on the daemon — every image of the current
@@ -91,9 +93,14 @@ export interface DockerPreviewRuntimeOptions {
   /** Sink for container stdout/stderr and lifecycle notes (Output channel in prod). */
   log?: (line: string) => void;
   /**
-   * When set, preview containers are granted workspace-question support: the
-   * runtime socket is mounted, a per-course shared network is created, and a
-   * per-course daemon-managed named volume is created and mounted to hold the
+   * Course roots known before the server starts. Pre-registering them lets the
+   * first container mount every course in a multi-course workspace at once.
+   */
+  courseRoots?: readonly string[];
+  /**
+   * When set, the preview server is granted workspace-question support: the
+   * runtime socket is mounted, one shared network is created, and one
+   * daemon-managed named volume is created and mounted to hold all session-owned
    * workspace home dirs. Absent when the workspace is untrusted or the resolved
    * endpoint is not socket-based.
    */
@@ -122,14 +129,16 @@ const PROBE_TIMEOUT_MS = 1_000;
  */
 const STOP_TIMEOUT_SECONDS = 10;
 
-interface RunningContainer {
+interface RunningServer {
   container: Docker.Container;
   port: number;
-  previewSessionId: string;
+  courseRoots: ReadonlySet<string>;
+  workspacesEnabled: boolean;
 }
 
 interface CreatedContainer {
   container: Docker.Container;
+  courseRoots: ReadonlySet<string>;
   workspacesEnabled: boolean;
 }
 
@@ -142,7 +151,15 @@ export class DockerPreviewRuntime implements PreviewRuntime {
   private readonly workspaces: PreviewWorkspaceSupport | undefined;
   /** Optional control-plane credential, retained only in the extension host. */
   private readonly authToken = randomBytes(32).toString('base64url');
-  private readonly running = new Map<string, RunningContainer>();
+  /** Names this runtime's one server container and its shared workspace resources. */
+  private readonly serverId = randomBytes(8).toString('hex');
+  /** Host course root → private absolute course path inside the container. */
+  private readonly courseDirs = new Map<string, string>();
+  /** Course root → session id on the current server generation. */
+  private readonly sessions = new Map<string, string>();
+  private running: RunningServer | undefined;
+  /** Serializes server replacement, session mutation, and shutdown. */
+  private operations: Promise<void> = Promise.resolve();
   /**
    * Cached daemon capability check: whether the Engine supports per-workspace
    * volume subpath mounts (VolumeOptions.Subpath, API >= 1.45). Resolved lazily on
@@ -157,6 +174,19 @@ export class DockerPreviewRuntime implements PreviewRuntime {
     this.cliNames = options.cliNames ?? ['docker'];
     this.log = options.log ?? (() => {});
     this.workspaces = options.workspaces;
+    this.registerCourseRoots(options.courseRoots ?? []);
+  }
+
+  /**
+   * Add course roots that should be mounted when the server next starts. This is
+   * safe to call repeatedly as workspace discovery finds the same marker files.
+   * A later, previously unknown course triggers one coordinated server restart,
+   * because Docker cannot add bind mounts to an already-running container.
+   */
+  registerCourseRoots(courseRoots: readonly string[]): void {
+    for (const courseRoot of courseRoots) {
+      this.registerCourseRoot(courseRoot);
+    }
   }
 
   /**
@@ -182,62 +212,56 @@ export class DockerPreviewRuntime implements PreviewRuntime {
     courseRoot: string,
     onProgress?: (progress: PreviewStartupProgress) => void,
   ): Promise<{ port: number; previewSessionId: string }> {
-    const existing = this.running.get(courseRoot);
-    if (existing) {
-      return {
-        port: existing.port,
-        previewSessionId: existing.previewSessionId,
-      };
-    }
+    const normalizedCourseRoot = this.registerCourseRoot(courseRoot);
+    return this.runExclusive(async () => {
+      let server = this.running;
+      if (server && !server.courseRoots.has(normalizedCourseRoot)) {
+        this.log(`[pl-preview] restarting preview server to mount ${normalizedCourseRoot}`);
+        await this.stopServer(server, false);
+        server = undefined;
+      }
+      server ??= await this.startServer(onProgress);
 
-    const { container, workspacesEnabled } = await this.createContainer(courseRoot, onProgress);
-    try {
-      onProgress?.({
-        phase: 'startingContainer',
-        imageVersion: this.imageVersion,
-      });
-      await container.start();
-      this.streamLogs(container);
-      const inspect = await container.inspect();
-      const port = resolvePublishedPort(inspect as unknown as PreviewContainerInspect);
-      await this.waitForReady(port, onProgress);
+      const existing = this.sessions.get(normalizedCourseRoot);
+      if (existing) {
+        return { port: server.port, previewSessionId: existing };
+      }
+
       const session = await discoverLocalPreviewSession({
-        origin: previewOrigin(port),
-        courseDir: PREVIEW_COURSE_MOUNT,
+        origin: previewOrigin(server.port),
+        courseDir: this.courseDirs.get(normalizedCourseRoot)!,
         authToken: this.authToken,
-        requireWorkspaces: workspacesEnabled,
+        requireWorkspaces: server.workspacesEnabled,
       });
-      this.running.set(courseRoot, {
-        container,
-        port,
-        previewSessionId: session.previewSessionId,
-      });
-      this.log(`[pl-preview] preview ready for ${courseRoot} on 127.0.0.1:${port} (${session.previewSessionId})`);
-      return { port, previewSessionId: session.previewSessionId };
-    } catch (error) {
-      await this.forceRemove(container);
-      throw error;
-    }
+      this.sessions.set(normalizedCourseRoot, session.previewSessionId);
+      this.log(
+        `[pl-preview] preview session ready for ${normalizedCourseRoot} on 127.0.0.1:${server.port} (${session.previewSessionId})`,
+      );
+      return { port: server.port, previewSessionId: session.previewSessionId };
+    });
   }
 
   async stop(courseRoot: string): Promise<void> {
-    const running = this.running.get(courseRoot);
-    if (!running) {
-      return;
-    }
-    this.running.delete(courseRoot);
-    await this.deleteSession(running);
-    await this.gracefulRemove(running.container);
-    await this.cleanupWorkspaceSupport(courseRoot);
+    const normalizedCourseRoot = path.resolve(courseRoot);
+    await this.runExclusive(async () => {
+      const previewSessionId = this.sessions.get(normalizedCourseRoot);
+      const server = this.running;
+      if (!previewSessionId || !server) return;
+      this.sessions.delete(normalizedCourseRoot);
+      await this.deleteSession(server.port, previewSessionId);
+    });
   }
 
   async stopAll(): Promise<void> {
-    const courseRoots = [...this.running.keys()];
-    const containers = [...this.running.values()];
-    this.running.clear();
-    await Promise.all(containers.map((running) => this.deleteSession(running)));
-    await Promise.all(containers.map(({ container }) => this.gracefulRemove(container)));
-    await Promise.all(courseRoots.map((courseRoot) => this.cleanupWorkspaceSupport(courseRoot)));
+    await this.runExclusive(async () => {
+      const server = this.running;
+      if (server) {
+        await this.stopServer(server, true);
+      } else {
+        this.sessions.clear();
+        await this.cleanupWorkspaceSupport();
+      }
+    });
   }
 
   async listRemovablePreviewImages(): Promise<RemovablePreviewImage[]> {
@@ -256,15 +280,19 @@ export class DockerPreviewRuntime implements PreviewRuntime {
    * image" 404. The pull reports real per-layer download progress through
    * `onProgress` so the shell can show it in the "Starting preview…" overview.
    */
-  private async createContainer(
-    courseRoot: string,
-    onProgress?: (progress: PreviewStartupProgress) => void,
-  ): Promise<CreatedContainer> {
-    const workspaces = await this.prepareWorkspaceSupport(courseRoot, onProgress);
+  private async createContainer(onProgress?: (progress: PreviewStartupProgress) => void): Promise<CreatedContainer> {
+    const workspaces = await this.prepareWorkspaceSupport(onProgress);
+    const courseMounts = [...this.courseDirs].map(
+      ([courseRoot, courseDir]): PreviewCourseMount => ({
+        courseRoot,
+        courseDir,
+      }),
+    );
+    const courseRoots = new Set(courseMounts.map(({ courseRoot }) => courseRoot));
     const options = buildPreviewContainerCreateOptions({
       image: this.image,
-      courseRoot,
-      courseId: previewCourseId(courseRoot),
+      courseMounts,
+      serverId: this.serverId,
       authToken: this.authToken,
       workspaces,
     });
@@ -272,6 +300,7 @@ export class DockerPreviewRuntime implements PreviewRuntime {
     try {
       return {
         container: await this.docker.createContainer(options),
+        courseRoots,
         workspacesEnabled: workspaces != null,
       };
     } catch (error) {
@@ -282,8 +311,34 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       await this.pullImage(onProgress);
       return {
         container: await this.docker.createContainer(options),
+        courseRoots,
         workspacesEnabled: workspaces != null,
       };
+    }
+  }
+
+  /** Start one server generation with a snapshot of all currently known course mounts. */
+  private async startServer(onProgress?: (progress: PreviewStartupProgress) => void): Promise<RunningServer> {
+    const { container, courseRoots, workspacesEnabled } = await this.createContainer(onProgress);
+    try {
+      onProgress?.({
+        phase: 'startingContainer',
+        imageVersion: this.imageVersion,
+      });
+      await container.start();
+      this.streamLogs(container);
+      const inspect = await container.inspect();
+      const port = resolvePublishedPort(inspect as unknown as PreviewContainerInspect);
+      await this.waitForReady(port, onProgress);
+      const server = { container, courseRoots, port, workspacesEnabled };
+      this.running = server;
+      this.log(
+        `[pl-preview] shared preview server ready on 127.0.0.1:${port} (${courseRoots.size} course mount${courseRoots.size === 1 ? '' : 's'})`,
+      );
+      return server;
+    } catch (error) {
+      await this.forceRemove(container);
+      throw error;
     }
   }
 
@@ -338,18 +393,32 @@ export class DockerPreviewRuntime implements PreviewRuntime {
     throw new Error(`Preview server on ${origin} did not become ready in time`);
   }
 
-  /** Best-effort explicit ownership cleanup; process shutdown remains the fallback. */
-  private async deleteSession(running: RunningContainer): Promise<void> {
+  /** Best-effort explicit session cleanup; process shutdown remains the fallback. */
+  private async deleteSession(port: number, previewSessionId: string): Promise<void> {
     try {
       await deleteLocalPreviewSession({
-        origin: previewOrigin(running.port),
-        previewSessionId: running.previewSessionId,
+        origin: previewOrigin(port),
+        previewSessionId,
         authToken: this.authToken,
       });
     } catch (error) {
       this.log(
-        `[pl-preview] could not delete ${running.previewSessionId} before container stop: ${error instanceof Error ? error.message : String(error)}`,
+        `[pl-preview] could not delete ${previewSessionId}: ${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+  }
+
+  /** Close all current sessions and stop one server generation. */
+  private async stopServer(server: RunningServer, cleanupWorkspaces: boolean): Promise<void> {
+    const previewSessionIds = [...this.sessions.values()];
+    this.sessions.clear();
+    await Promise.all(previewSessionIds.map((previewSessionId) => this.deleteSession(server.port, previewSessionId)));
+    if (this.running === server) {
+      this.running = undefined;
+    }
+    await this.gracefulRemove(server.container);
+    if (cleanupWorkspaces) {
+      await this.cleanupWorkspaceSupport();
     }
   }
 
@@ -397,13 +466,11 @@ export class DockerPreviewRuntime implements PreviewRuntime {
   }
 
   /**
-   * Prepare per-course workspace support: ensure the shared network and a
-   * daemon-managed named volume for the workspace home dirs exist, then return
-   * the container-spec config. Returns undefined when workspace support is
-   * disabled for this session.
+   * Prepare server-wide workspace support: ensure the shared network and named
+   * home volume exist, then return the container-spec config. Local Preview
+   * Sessions namespace their workspace ownership within these shared resources.
    */
   private async prepareWorkspaceSupport(
-    courseRoot: string,
     onProgress?: (progress: PreviewStartupProgress) => void,
   ): Promise<PreviewWorkspaceContainerConfig | undefined> {
     const support = this.workspaces;
@@ -423,8 +490,8 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       return undefined;
     }
 
-    const network = previewNetworkName(previewCourseId(courseRoot));
-    const volumeName = workspaceVolumeName(courseRoot);
+    const network = previewNetworkName(this.serverId);
+    const volumeName = workspaceVolumeName(this.serverId);
     await this.ensureNetwork(network);
     // createVolume is idempotent: it returns the existing volume for a name that
     // already exists rather than erroring, so a warm re-open just reuses it.
@@ -531,19 +598,18 @@ export class DockerPreviewRuntime implements PreviewRuntime {
   }
 
   /**
-   * Reap any workspace containers this course's preview server left behind,
-   * remove its now-unused network, then best-effort remove its named volume. The
-   * preview server reaps its own children on a graceful stop; this is the
-   * backstop for a hard kill.
+   * Reap workspace containers the shared server left behind, remove its network,
+   * then best-effort remove its named volume. The server reaps its own children
+   * on a graceful stop; this is the backstop for a hard kill.
    */
-  private async cleanupWorkspaceSupport(courseRoot: string): Promise<void> {
+  private async cleanupWorkspaceSupport(): Promise<void> {
     const support = this.workspaces;
     if (support == null) {
       return;
     }
-    const volumeName = workspaceVolumeName(courseRoot);
+    const volumeName = workspaceVolumeName(this.serverId);
     await this.reapWorkspaceContainers(volumeName);
-    await this.removeNetwork(previewNetworkName(previewCourseId(courseRoot)));
+    await this.removeNetwork(previewNetworkName(this.serverId));
     try {
       await this.docker.getVolume(volumeName).remove({ force: true });
     } catch {
@@ -574,6 +640,25 @@ export class DockerPreviewRuntime implements PreviewRuntime {
       /* still in use by another container, or already gone */
     }
   }
+
+  /** Add one normalized course root and return the key used by session state. */
+  private registerCourseRoot(courseRoot: string): string {
+    const normalizedCourseRoot = path.resolve(courseRoot);
+    if (!this.courseDirs.has(normalizedCourseRoot)) {
+      this.courseDirs.set(normalizedCourseRoot, `${PREVIEW_COURSES_MOUNT}/${previewCourseId(normalizedCourseRoot)}`);
+    }
+    return normalizedCourseRoot;
+  }
+
+  /** Run one lifecycle mutation after every earlier mutation, even if one failed. */
+  private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operations.then(operation, operation);
+    this.operations = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
 }
 
 /** Reuse a stable course id from the folder name, plus a short path hash for uniqueness. */
@@ -586,14 +671,14 @@ export function previewCourseId(courseRoot: string): string {
   return `${base}-${(hash >>> 0).toString(36)}`;
 }
 
-/** Name of the per-course user-defined network the preview and workspace containers share. */
-export function previewNetworkName(courseId: string): string {
-  return `pl-preview-net-${courseId}`;
+/** Name of the server-wide network the preview and workspace containers share. */
+export function previewNetworkName(serverId: string): string {
+  return `pl-preview-net-${serverId}`;
 }
 
-/** Per-course daemon-managed named volume holding the workspace home dirs. */
-function workspaceVolumeName(courseRoot: string): string {
-  return `pl-preview-workspaces-${previewCourseId(courseRoot)}`;
+/** Server-wide daemon-managed named volume holding session-scoped workspace homes. */
+function workspaceVolumeName(serverId: string): string {
+  return `pl-preview-workspaces-${serverId}`;
 }
 
 /**

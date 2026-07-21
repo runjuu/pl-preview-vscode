@@ -30,8 +30,8 @@ export const PREVIEW_CONTAINER_PORT = 4310;
  */
 export const PREVIEW_SERVER_ENTRYPOINT = '/PrairieLearn/apps/prairielearn/dist/preview-server.js';
 
-/** Path the course tree is bind-mounted at inside the container. */
-export const PREVIEW_COURSE_MOUNT = '/course';
+/** Root under which every discovered course is bind-mounted read-only. */
+export const PREVIEW_COURSES_MOUNT = '/courses';
 
 /**
  * Path the workspace-home volume is bind-mounted at inside the preview
@@ -63,8 +63,8 @@ export const PREVIEW_TMP_TMPFS = 'rw,nosuid,noexec,size=64m';
 
 /** Marks a container as owned by this extension (for discovery/reconciliation). */
 export const PREVIEW_LABEL = 'pl-preview-vscode.preview';
-/** Records which course root a container serves. */
-export const PREVIEW_COURSE_LABEL = 'pl-preview-vscode.preview.course';
+/** Identifies the one preview server owned by this extension runtime. */
+export const PREVIEW_SERVER_LABEL = 'pl-preview-vscode.preview.server';
 
 /** Non-root uid:gid the container runs as. */
 export const PREVIEW_CONTAINER_USER = '1001:1001';
@@ -105,10 +105,10 @@ export interface PreviewWorkspaceContainerConfig {
 export interface PreviewContainerSpecInput {
   /** Pinned preview-server image reference. */
   image: string;
-  /** Absolute host path of the course root; bind-mounted read-only. */
-  courseRoot: string;
-  /** Stable identifier for the course (used for the label and container name). */
-  courseId: string;
+  /** Courses visible to this server, each bind-mounted at its private container path. */
+  courseMounts: readonly PreviewCourseMount[];
+  /** Identifier shared by the server container and its workspace resources. */
+  serverId: string;
   /** Backend-only bearer credential protecting metadata and session management. */
   authToken: string;
   /**
@@ -117,6 +117,12 @@ export interface PreviewContainerSpecInput {
    * equivalent with a rootful daemon), so callers gate it on workspace trust.
    */
   workspaces?: PreviewWorkspaceContainerConfig;
+}
+
+/** One host course tree and the absolute path at which the server sees it. */
+export interface PreviewCourseMount {
+  readonly courseRoot: string;
+  readonly courseDir: string;
 }
 
 /**
@@ -270,20 +276,22 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
- * Build the dockerode create options for a course's Local Preview Container.
+ * Build the dockerode create options for the extension's Local Preview Container.
  *
  * The container runs the author's `server.py` and custom elements, so it is
  * hardened (non-root, all caps dropped, no-new-privileges, read-only rootfs with
  * a small `/tmp` tmpfs, memory/CPU/PID ceilings). Unlike the hosted stack it is
  * *not* attached to a no-egress network because the local author's own course is
  * trusted. The course is bound read-only so a render can never mutate the
- * author's source, and the port is published on an ephemeral loopback host port
- * so a second course (or a real PrairieLearn) never collides on 4310.
+ * author's source. Every known course is mounted independently so one Standalone
+ * Preview Server can own multiple course-scoped Local Preview Sessions without
+ * exposing unrelated workspace files. The port is published on an ephemeral
+ * loopback host port so a real PrairieLearn never collides on 4310.
  */
 export function buildPreviewContainerCreateOptions(input: PreviewContainerSpecInput): Docker.ContainerCreateOptions {
-  const { image, courseRoot, courseId, authToken, workspaces } = input;
+  const { image, courseMounts, serverId, authToken, workspaces } = input;
 
-  const binds = [`${courseRoot}:${PREVIEW_COURSE_MOUNT}:ro`];
+  const binds = courseMounts.map(({ courseRoot, courseDir }) => `${courseRoot}:${courseDir}:ro`);
   const cmd = [
     '--host',
     '0.0.0.0',
@@ -346,7 +354,7 @@ export function buildPreviewContainerCreateOptions(input: PreviewContainerSpecIn
     Cmd: cmd,
     Labels: {
       [PREVIEW_LABEL]: 'true',
-      [PREVIEW_COURSE_LABEL]: courseId,
+      [PREVIEW_SERVER_LABEL]: serverId,
     },
     ExposedPorts: { [PORT_KEY]: {} },
     HostConfig: hostConfig,

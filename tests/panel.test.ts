@@ -10,6 +10,7 @@ import {
   PREVIEW_VIEW_TYPE,
   REFRESH_PREVIEW_COMMAND,
   SHOW_LOGS_COMMAND,
+  STOP_SERVERS_COMMAND,
   WORKSPACE_PANEL_TITLE,
   WORKSPACE_VIEW_TYPE,
   emptyPanelHtml,
@@ -80,6 +81,14 @@ describe('PrairieLearn Preview panel', () => {
 
     assert.ok(showLogsCommand, `manifest must contribute ${SHOW_LOGS_COMMAND}`);
     assert.equal(showLogsCommand.title, 'Show logs');
+  });
+
+  it('contributes the shared-server stop command declared by the constant', () => {
+    const commands = readManifest().contributes.commands;
+    const stopServerCommand = commands.find((command) => command.command === STOP_SERVERS_COMMAND);
+
+    assert.ok(stopServerCommand, `manifest must contribute ${STOP_SERVERS_COMMAND}`);
+    assert.equal(stopServerCommand.title, 'Stop preview server');
   });
 
   it('keeps the command id and view type in the plPreview namespace', () => {

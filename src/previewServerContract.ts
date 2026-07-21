@@ -11,7 +11,7 @@ export interface LocalPreviewSessionDescriptor {
 
 export interface DiscoverLocalPreviewSessionOptions {
   readonly origin: string;
-  /** Absolute course path as seen by the server (the extension mounts `/course`). */
+  /** Absolute course path as seen by the server under its private read-only mount. */
   readonly courseDir: string;
   /** Optional control-plane credential; deliberately omitted from `GET /health`. */
   readonly authToken?: string;

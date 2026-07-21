@@ -91,9 +91,9 @@ class FakeSource implements EditorWorkspaceSource {
 }
 
 /**
- * Runtime that answers ensureRunning instantly with a stable port per course, and
- * records the pool's `stop` / `stopAll` calls so tests can assert eviction,
- * reaping, and dispose-all through the port.
+ * Runtime that answers ensureRunning instantly on one stable server port and
+ * records the session pool's `stop` / `stopAll` calls so tests can assert
+ * eviction, reaping, and dispose-all through the port.
  */
 class InstantRuntime implements ContainerRuntime {
   readonly calls: string[] = [];
@@ -687,7 +687,7 @@ describe('PreviewController — concurrency and disposal', () => {
   });
 });
 
-describe('PreviewController — warm container pool', () => {
+describe('PreviewController — warm course-session pool', () => {
   // Synthetic multi-course targets resolved without touching the filesystem, so the
   // pool policy (reuse, LRU eviction, idle reaping, dispose-all) is exercised
   // directly through the ports. Each file name maps to a distinct course root.
@@ -755,7 +755,7 @@ describe('PreviewController — warm container pool', () => {
     );
   });
 
-  it('reaps a container left idle past the TTL while keeping the on-screen course warm', async () => {
+  it('reaps a session left idle past the TTL while keeping the on-screen course warm', async () => {
     const { source, runtime, clock, controller } = poolController({
       poolCap: 3,
       idleTtlMs: 1_000,
@@ -797,7 +797,7 @@ describe('PreviewController — warm container pool', () => {
     assert.ok(!rt.stops.includes('/courses/a'), 'the recently re-previewed course is not reaped');
   });
 
-  it('stops all containers and cold-starts again after "Stop preview servers"', async () => {
+  it('stops the shared server and cold-starts again after "Stop preview server"', async () => {
     const { source, sink, runtime, controller } = poolController();
     const rt = runtime as InstantRuntime;
 
@@ -806,7 +806,7 @@ describe('PreviewController — warm container pool', () => {
     await flush();
 
     await controller.stopServers();
-    assert.equal(rt.stopAllCount, 1, 'every running container is stopped');
+    assert.equal(rt.stopAllCount, 1, 'the shared server is stopped');
     assert.equal(sink.last?.kind, 'empty', 'the panel returns to the empty state');
 
     // The pool is cleared, so re-previewing the same course cold-starts again.
@@ -818,7 +818,7 @@ describe('PreviewController — warm container pool', () => {
     );
   });
 
-  it('stops all containers on dispose (window close)', async () => {
+  it('stops the shared server on dispose (window close)', async () => {
     const { source, runtime, controller } = poolController();
     const rt = runtime as InstantRuntime;
 
@@ -828,7 +828,7 @@ describe('PreviewController — warm container pool', () => {
     await preview(source, 'b.html');
 
     controller.dispose();
-    assert.equal(rt.stopAllCount, 1, 'closing the window disposes every container');
+    assert.equal(rt.stopAllCount, 1, 'closing the window disposes the shared server');
   });
 });
 

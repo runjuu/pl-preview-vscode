@@ -617,7 +617,7 @@ async function probeCandidate(candidate: RuntimeCandidate): Promise<RuntimeAvail
 
 /**
  * Bind the session to a resolved candidate, building its dockerode-backed runtime.
- * Idempotent for an unchanged endpoint so warm containers survive repeated opens;
+ * Idempotent for an unchanged endpoint so the warm server survives repeated opens;
  * a changed endpoint only reaches here after a config change disposed the old one.
  */
 function buildRuntime(candidate: RuntimeCandidate): void {
@@ -768,6 +768,13 @@ async function openPreview(context: vscode.ExtensionContext): Promise<void> {
     return;
   }
 
+  // Mount every course currently visible in the workspace before the first
+  // container starts. The server can then create independent Local Preview
+  // Sessions as the editor moves between courses without launching another
+  // container. A course added later is still handled by the runtime's
+  // coordinated remount/restart fallback.
+  await registerWorkspaceCourses();
+
   const view = ensurePanel(context);
 
   if (!controller) {
@@ -786,6 +793,16 @@ async function openPreview(context: vscode.ExtensionContext): Promise<void> {
   await controller.start();
 }
 
+/** Discover course markers without mounting unrelated workspace files. */
+async function registerWorkspaceCourses(): Promise<void> {
+  const markers = await vscode.workspace.findFiles('**/infoCourse.json', '**/{.git,node_modules}/**');
+  const courseRoots = [...new Set(markers.map((marker) => path.dirname(marker.fsPath)))];
+  getRuntime().registerCourseRoots(courseRoots);
+  getOutput().appendLine(
+    `[pl-preview] discovered ${courseRoots.length} course${courseRoots.length === 1 ? '' : 's'} in this workspace`,
+  );
+}
+
 /** How long to wait for a just-launched runtime to accept connections (Podman VM boots are slow). */
 const RUNTIME_START_TIMEOUT_MS = 120_000;
 /** How often to re-probe the daemon while waiting for the runtime to start. */
@@ -795,7 +812,7 @@ const RUNTIME_LAUNCH_FAILURE_GRACE_MS = 1_500;
 
 /**
  * Resolve and reach a container runtime. Returns `true` to proceed. Once a runtime
- * is bound this session, it is only re-verified (so warm containers persist);
+ * is bound this session, it is only re-verified (so the warm server persists);
  * otherwise the configured selection is resolved and the first reachable endpoint
  * is bound. On a missing / stopped / unreachable runtime it shows the actionable
  * remediation and returns `false` — except when the author clicks "Start …", where
@@ -1146,12 +1163,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(NEW_VARIANT_COMMAND, () => controller?.newVariant()),
     // "Show logs": reveal the container's stdout/stderr Output channel on demand.
     vscode.commands.registerCommand(SHOW_LOGS_COMMAND, () => getOutput().show(true)),
-    // "Stop preview servers": stop every warm container to reclaim resources.
+    // "Stop preview server": stop the shared container to reclaim resources.
     vscode.commands.registerCommand(STOP_SERVERS_COMMAND, () => controller?.stopServers()),
     // "Delete old preview images": reclaim the disk left by superseded image pins.
     vscode.commands.registerCommand(DELETE_OLD_IMAGES_COMMAND, () => deleteOldImages()),
     // Rebind the runtime when the author changes the runtime/endpoint settings, so
-    // the next preview resolves against the new selection (and warm containers on
+    // the next preview resolves against the new selection (and the warm server on
     // the old runtime are stopped).
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (

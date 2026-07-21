@@ -40,27 +40,27 @@ export interface EditorWorkspaceSource {
 }
 
 /**
- * Starts, reuses, and stops the Local Preview Container(s), keyed by course root.
+ * Starts or reuses one Local Preview Server and manages its course sessions.
  *
  * The warm-pool *policy* (LRU cap, idle reaping, dispose-all) lives in the
  * {@link PreviewController}, which drives this port: it calls {@link stop} to
- * evict the least-recently-used course or reap an idle one, and {@link stopAll}
- * on window close / the "Stop preview servers" command. The runtime itself only
- * owns the container I/O.
+ * close the least-recently-used or idle course session, and {@link stopAll} on
+ * window close / the "Stop preview server" command. The runtime owns the one
+ * container and server process.
  */
 export interface ContainerRuntime {
   /**
-   * Start or reuse the container for `courseRoot`, returning its loopback port. On a
-   * cold start, `onProgress` receives the pull → start → readiness phases so the
+   * Start or reuse the shared server and `courseRoot` session. On a cold server
+   * start, `onProgress` receives the pull → start → readiness phases so the
    * controller can drive the "Starting preview…" overview.
    */
   ensureRunning(
     courseRoot: string,
     onProgress?: (progress: PreviewStartupProgress) => void,
   ): Promise<{ port: number; previewSessionId: string }>;
-  /** Stop and remove the container for `courseRoot` (LRU eviction / idle reaping). */
+  /** Close the session for `courseRoot` (LRU eviction / idle reaping). */
   stop(courseRoot: string): Promise<void>;
-  /** Stop every container the runtime started (window close / Stop preview servers). */
+  /** Stop the shared server and all sessions (window close / Stop preview server). */
   stopAll(): Promise<void>;
 }
 
@@ -160,10 +160,10 @@ export class PreviewController {
    */
   private readonly seeds = new Map<string, string>();
   /**
-   * Warm courses keyed by course root, ordered least- to most-recently-used
+   * Warm course sessions keyed by course root, ordered least- to most-recently-used
    * (Map preserves insertion order; a course is deleted and re-set on each use to
    * move it to the end). Each entry holds the cancellable idle-reap timer. This is
-   * the warm-pool state: membership decides whether a re-preview cold-starts, the
+   * the warm-pool state: membership decides whether a session must be recreated, the
    * ordering drives LRU eviction, and the timers drive idle reaping.
    */
   private readonly warm = new Map<string, WarmEntry>();
@@ -225,8 +225,8 @@ export class PreviewController {
   }
 
   /**
-   * Stop every running preview container on demand (the "Stop preview servers"
-   * command). Clears the warm pool and returns the panel to the empty state; the
+   * Stop the shared preview server on demand (the "Stop preview server" command).
+   * Clears the warm session pool and returns the panel to the empty state; the
    * next edit or editor switch cold-starts a fresh container.
    */
   async stopServers(): Promise<void> {
@@ -241,7 +241,7 @@ export class PreviewController {
     this.clearPool();
     for (const subscription of this.subscriptions) subscription.dispose();
     this.subscriptions.length = 0;
-    // Window close (or panel close) stops every container this controller warmed.
+    // Window close (or panel close) stops the shared server and every session.
     void this.runtime.stopAll();
   }
 
@@ -311,14 +311,14 @@ export class PreviewController {
       return;
     }
 
-    // A cold start shows the overview; a course whose container is already warm
-    // renders straight through, so switching back to it never flashes "Starting…".
+    // A cold course session shows the overview; a warm one renders straight
+    // through, so switching back to it never flashes "Starting…".
     const warm = this.warm.has(target.courseRoot);
     const coldStart = options.showStarting && !warm;
     if (coldStart) {
       this.sink.setState({ kind: 'starting' });
     }
-    this.log(`[render] ${target.qid}: ensuring container (warm=${warm}, token=${token})`);
+    this.log(`[render] ${target.qid}: ensuring preview session (warm=${warm}, token=${token})`);
 
     // Forward cold-start progress into the "Starting preview…" overview, guarded by
     // the render token so a superseded start's late ticks can't paint over newer
@@ -354,7 +354,7 @@ export class PreviewController {
       return;
     }
 
-    // The container is up: record the course as most-recently-used, (re)arm its
+    // The course session is up: record it as most-recently-used, (re)arm its
     // idle-reaper, and evict the least-recently-used course past the pool cap.
     this.markWarm(target.courseRoot);
 
@@ -402,7 +402,7 @@ export class PreviewController {
   }
 
   /**
-   * Idle-reaper callback: stop a course left untouched for the whole TTL. The
+   * Idle-reaper callback: close a course session left untouched for the whole TTL. The
    * course backing the on-screen preview is still in use, so it is kept warm and
    * its idle window re-armed rather than pulled out from under the author.
    */
@@ -419,7 +419,7 @@ export class PreviewController {
     this.evict(courseRoot);
   }
 
-  /** Stop a course's container and drop it from the pool (LRU eviction or reaping). */
+  /** Close a course session and drop it from the pool (LRU eviction or reaping). */
   private evict(courseRoot: string): void {
     const entry = this.warm.get(courseRoot);
     if (!entry) return;
@@ -428,7 +428,7 @@ export class PreviewController {
     void this.runtime.stop(courseRoot);
   }
 
-  /** Cancel every idle-reaper and forget the warm pool (leaves containers to the caller). */
+  /** Cancel every idle-reaper and forget the warm pool (leaves server cleanup to the caller). */
   private clearPool(): void {
     for (const entry of this.warm.values()) entry.reap.dispose();
     this.warm.clear();

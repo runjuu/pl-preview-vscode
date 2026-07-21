@@ -37,8 +37,8 @@ PrairieLearn Preview turns that into a tighter loop: edit ↔️ preview.
 - Use any Docker-compatible local container runtime.
 - Preview **workspace questions** without leaving VS Code.
 - Show render and container logs from the **PrairieLearn Preview** Output channel.
-- Keep preview servers warm for recently used courses, with a command to stop
-  them when you are done.
+- Keep one preview server warm while you move between courses, with a command to
+  stop it when you are done.
 
 ## Requirements
 
@@ -46,8 +46,8 @@ PrairieLearn Preview turns that into a tighter loop: edit ↔️ preview.
 - A Docker Engine API-compatible container runtime installed and running, such
   as Docker Desktop or Podman (Colima, Rancher Desktop, and OrbStack work too
   through their Docker-compatible socket)
-- A PrairieLearn course folder open in VS Code, with `infoCourse.json` at the
-  course root
+- One or more PrairieLearn course folders visible in the VS Code workspace, each
+  with `infoCourse.json` at its course root
 - Questions using any of PrairieLearn's six Source Question Types
 
 ## Install
@@ -81,26 +81,28 @@ starts.
 PrairieLearn Preview gives you a live edit-and-refresh loop without running a full
 local PrairieLearn instance.
 
-When you open a course folder, the extension watches the file you are editing
-and works out which question it belongs to by walking up to the nearest
-`infoCourse.json` (the course) and to the question's `info.json` under
-`questions/`.
+When you open a workspace containing one or more courses, the extension watches
+the file you are editing and works out which question it belongs to by walking
+up to the nearest `infoCourse.json` (the course) and to the question's
+`info.json` under `questions/`.
 
 The first time you open a preview, it detects your Docker-compatible container
-runtime and starts a small local container from a preview image built from my
+runtime and starts one small local container from a preview image built from my
 [PrairieLearn fork](https://github.com/runjuu/PrairieLearn) (pinned to an exact
-version for reproducible previews), with your course folder mounted
-**read-only**. That container runs a standalone preview server I added to the
-fork. The extension points a VS Code webview at the loopback server so the
-active question renders beside your editor.
+version for reproducible previews). Each discovered course folder is mounted
+independently and **read-only**; unrelated workspace files are not mounted. The
+container runs a standalone preview server I added to the fork. The extension
+points a VS Code webview at the loopback server so the active question renders
+beside your editor.
 
 Before showing a question, the extension checks the server's public health
 endpoint, discovers the `experimental-1` capabilities through an authenticated
 control plane, and creates or deliberately reuses a Local Preview Session for
-the mounted course. The opaque session ID scopes the question, course/question
-assets, generated/submission files, and Preview Workspace URLs. The extension
-generates the control-plane bearer token inside the extension host and never
-puts it in browser HTML or requests.
+the active course. Multiple course sessions share the same server process and
+PrairieLearn preview engine. Each opaque session ID scopes the question,
+course/question assets, generated/submission files, and Preview Workspace URLs.
+The extension generates the control-plane bearer token inside the extension host
+and never puts it in browser HTML or requests.
 
 The container requests `full` rendering explicitly so Preview Answer Check is
 available; the Standalone Preview Server itself now defaults to
@@ -123,16 +125,16 @@ flowchart LR
   runtime["Docker-compatible<br/>container runtime"]
   subgraph container["Local preview container"]
     server["PrairieLearn<br/>Standalone Preview Server"]
-    session["Local Preview Session"]
+    sessions["Course-scoped<br/>Local Preview Sessions"]
   end
 
   editor -->|"active question<br/>detected on edit / save"| ext
-  ext -->|"start or reuse server<br/>(course mounted read-only)"| runtime
+  ext -->|"start or reuse one server<br/>(courses mounted read-only)"| runtime
   runtime --> container
   ext -->|"health + metadata<br/>create/reuse session"| server
-  server --> session
+  server --> sessions
   ext -->|"session-scoped URL / variant"| panel
-  panel <-->|"rendered question + scoped resources<br/>over loopback HTTP"| session
+  panel <-->|"rendered question + scoped resources<br/>over loopback HTTP"| sessions
 ```
 
 ## Commands
@@ -145,7 +147,7 @@ You can also run PrairieLearn Preview commands from the Command Palette:
 | **PrairieLearn Preview: Refresh preview**           | Re-renders the current preview immediately.                                |
 | **PrairieLearn Preview: New variant**               | Rerolls the current question's variant seed.                               |
 | **PrairieLearn Preview: Show logs**                 | Opens the **PrairieLearn Preview** Output channel.                         |
-| **PrairieLearn Preview: Stop preview servers**      | Stops all running local preview servers.                                   |
+| **PrairieLearn Preview: Stop preview server**       | Stops the shared local preview server.                                     |
 | **PrairieLearn Preview: Delete old preview images** | Removes superseded preview container images after asking for confirmation. |
 
 ## Container runtime
@@ -181,8 +183,9 @@ machine's socket (from `podman machine inspect`). On Linux, the rootless socket
 Workspace questions run an interactive per-variant container, such as a terminal,
 VS Code in the browser, or JupyterLab. To preview one, the preview server must be
 able to launch that container itself, so PrairieLearn Preview mounts the
-container runtime socket into the preview container and connects both to a
-shared per-course network.
+container runtime socket into the preview container and connects it and its
+workspace containers to one server-owned network. Course sessions still own and
+clean up their workspace containers independently.
 
 Everything is proxied through the preview server, so the live workspace opens in
 a separate VS Code tab beside the preview. Click **Open workspace** on a
@@ -231,7 +234,7 @@ socket.
 **The first preview is slow.**
 
 The first run may download the preview image. Later previews reuse the downloaded
-image and warm preview servers.
+image and the warm shared preview server.
 
 **The panel says the question type is not previewable.**
 

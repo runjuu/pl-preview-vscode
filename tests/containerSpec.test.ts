@@ -4,9 +4,10 @@ import { describe, it } from 'node:test';
 import {
   DEFAULT_PREVIEW_IMAGE,
   PREVIEW_CONTAINER_PORT,
-  PREVIEW_COURSE_LABEL,
+  PREVIEW_COURSES_MOUNT,
   PREVIEW_DOCKER_SOCKET_MOUNT,
   PREVIEW_LABEL,
+  PREVIEW_SERVER_LABEL,
   PREVIEW_SERVER_ENTRYPOINT,
   PREVIEW_WORKSPACE_HOME_MOUNT,
   type PreviewImageInfo,
@@ -19,6 +20,7 @@ import {
 } from '../src/containerSpec';
 
 const courseRoot = '/Users/author/my-course';
+const courseDir = `${PREVIEW_COURSES_MOUNT}/my-course`;
 const authToken = 'extension-control-secret';
 const PINNED_PREVIEW_IMAGE =
   'ghcr.io/runjuu/prairielearn:sha-6fd23e1@sha256:d480645624195991e42197f9105ae1a818065ca58098da041a2a6403fde3862a';
@@ -26,8 +28,8 @@ const PINNED_PREVIEW_IMAGE =
 function createOptions() {
   return buildPreviewContainerCreateOptions({
     image: DEFAULT_PREVIEW_IMAGE,
-    courseRoot,
-    courseId: 'my-course',
+    courseMounts: [{ courseRoot, courseDir }],
+    serverId: 'server-1',
     authToken,
   });
 }
@@ -52,10 +54,26 @@ describe('buildPreviewContainerCreateOptions', () => {
     );
   });
 
-  it('bind-mounts the course read-only at the container course path', () => {
-    const binds = createOptions().HostConfig?.Binds ?? [];
+  it('bind-mounts every course independently and read-only', () => {
+    const secondRoot = '/Users/author/other-course';
+    const options = buildPreviewContainerCreateOptions({
+      image: DEFAULT_PREVIEW_IMAGE,
+      courseMounts: [
+        { courseRoot, courseDir },
+        {
+          courseRoot: secondRoot,
+          courseDir: `${PREVIEW_COURSES_MOUNT}/other-course`,
+        },
+      ],
+      serverId: 'server-1',
+      authToken,
+    });
+    const binds = options.HostConfig?.Binds ?? [];
 
-    assert.deepEqual(binds, [`${courseRoot}:/course:ro`]);
+    assert.deepEqual(binds, [
+      `${courseRoot}:${courseDir}:ro`,
+      `${secondRoot}:${PREVIEW_COURSES_MOUNT}/other-course:ro`,
+    ]);
   });
 
   it('publishes the container port on a dynamic loopback host port', () => {
@@ -91,13 +109,13 @@ describe('buildPreviewContainerCreateOptions', () => {
     assert.equal(createOptions().HostConfig?.NetworkMode, undefined);
   });
 
-  it('labels the container so it can be discovered and reconciled by course', () => {
+  it("labels the container as the runtime's one shared server", () => {
     const labels = createOptions().Labels ?? {};
 
     assert.equal(PREVIEW_LABEL, 'pl-preview-vscode.preview');
-    assert.equal(PREVIEW_COURSE_LABEL, 'pl-preview-vscode.preview.course');
+    assert.equal(PREVIEW_SERVER_LABEL, 'pl-preview-vscode.preview.server');
     assert.equal(labels[PREVIEW_LABEL], 'true');
-    assert.equal(labels[PREVIEW_COURSE_LABEL], 'my-course');
+    assert.equal(labels[PREVIEW_SERVER_LABEL], 'server-1');
   });
 
   it('runs the caller-supplied image verbatim', () => {
@@ -116,8 +134,8 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
   function workspaceOptions() {
     return buildPreviewContainerCreateOptions({
       image: DEFAULT_PREVIEW_IMAGE,
-      courseRoot,
-      courseId: 'my-course',
+      courseMounts: [{ courseRoot, courseDir }],
+      serverId: 'server-1',
       authToken,
       workspaces,
     });
@@ -126,7 +144,7 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
   it('mounts the runtime socket and the named workspace-home volume', () => {
     const binds = workspaceOptions().HostConfig?.Binds ?? [];
 
-    assert.ok(binds.includes(`${courseRoot}:/course:ro`), 'course stays read-only');
+    assert.ok(binds.includes(`${courseRoot}:${courseDir}:ro`), 'course stays read-only');
     assert.ok(
       binds.includes(`${workspaces.dockerSocketPath}:${PREVIEW_DOCKER_SOCKET_MOUNT}`),
       'the host runtime socket must be mounted where the ambient client expects it',
@@ -174,8 +192,8 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
     const host =
       buildPreviewContainerCreateOptions({
         image: DEFAULT_PREVIEW_IMAGE,
-        courseRoot,
-        courseId: 'my-course',
+        courseMounts: [{ courseRoot, courseDir }],
+        serverId: 'server-1',
         authToken,
         workspaces: { ...workspaces, socketGid: undefined },
       }).HostConfig ?? {};
@@ -187,8 +205,8 @@ describe('buildPreviewContainerCreateOptions with workspace support', () => {
     const host =
       buildPreviewContainerCreateOptions({
         image: DEFAULT_PREVIEW_IMAGE,
-        courseRoot,
-        courseId: 'my-course',
+        courseMounts: [{ courseRoot, courseDir }],
+        serverId: 'server-1',
         authToken,
         workspaces: { ...workspaces, socketGid: 0 },
       }).HostConfig ?? {};

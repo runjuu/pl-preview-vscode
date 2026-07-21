@@ -86,7 +86,7 @@
       },
       {
         "command": "plPreview.stopServers",
-        "title": "Stop preview servers",
+        "title": "Stop preview server",
         "category": "PrairieLearn Preview"
       },
       {
