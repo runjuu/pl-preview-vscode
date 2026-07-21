@@ -2,7 +2,7 @@
   "name": "pl-preview-vscode",
   "displayName": "PrairieLearn Preview",
   "description": "Preview PrairieLearn questions side by side in VS Code. Save your edits and the rendered question refreshes instantly from a local server running in Docker or Podman.",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "publisher": "runjuu",
   "license": "MIT",
   "icon": "media/icon.png",

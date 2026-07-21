@@ -4,6 +4,8 @@ All notable changes to PrairieLearn Preview will be documented in this file.
 
 ## Unreleased
 
+## 1.3.0 - 2026-07-21
+
 - Add common Prairie misspellings and single-character omissions to the extension
   keywords so PrairieLearn searches are more forgiving.
 - Migrate startup and Editor-Following Preview to the Standalone Preview Server's
